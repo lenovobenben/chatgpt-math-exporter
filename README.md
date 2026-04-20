@@ -24,7 +24,7 @@ ChatGPT is the first supported platform; support for other AI assistants such as
 * Export from:
 
   * ChatGPT official export (`conversations.json`)
-  * ChatGPT Project URL (via browser session)
+  * ChatGPT Project URL (with a valid ChatGPT session cookie)
 * Batch export by project
 
 ---
@@ -58,7 +58,7 @@ ChatGPT is the first supported platform; support for other AI assistants such as
 
 ---
 
-### 🖼 Asset handling
+### 🖼 Planned asset handling
 
 * Download all images locally
 * Replace external links with local paths
@@ -87,10 +87,10 @@ ChatGPT is the first supported platform; support for other AI assistants such as
 
 ---
 
-### 🔗 Link preservation
+### 🔗 Current link handling
 
-* Keep all external links (papers, websites, etc.)
-* Optional reference index
+* Preserve links that already appear in exported text
+* Reference indexing is not implemented yet
 
 ---
 
@@ -132,28 +132,28 @@ cgme export \
 
 ---
 
-### Docker
-
-```bash
-docker run -it \
-  -v $(pwd):/data \
-  cgme \
-  export --bundle /data/export --output /data/out
-```
-
----
-
 ## 🛠 Development Status
 
-This repository is currently in the **bootstrap stage**.
+This repository is now in an **early working stage**.
 
-At the moment, the project vision and product scope are documented, but the codebase is not scaffolded yet. The implementation direction is now explicit:
+Implemented today:
 
-* Primary language: **Go**
-* Final artifact: **one local executable binary**
-* Runtime model: **CLI flags and optional config file**
-* Target users: **including non-programmers**
-* Main goal: **import from ChatGPT into a local folder that can be pushed directly to GitHub**
+* runnable Go CLI
+* config file loading (`json` / simple `yaml`)
+* official ChatGPT export parsing from `conversations.json`
+* Markdown rendering with basic Q/A structure
+* conservative math normalization for common Unicode symbols
+* conservative ` ```math ` block wrapping for standalone formula lines
+* `warnings.json` output for heuristic transforms
+* ChatGPT Project URL parsing
+* macOS + Chrome Project URL fetching with a valid ChatGPT session cookie
+
+Still incomplete:
+
+* image and asset downloading
+* richer ChatGPT content node support
+* stronger formula detection and inline math wrapping
+* support beyond the current macOS + Chrome + ChatGPT scope
 
 ---
 
@@ -167,12 +167,11 @@ go run ./cmd/cgme export --bundle ./chatgpt-export --output ./out
 go build -o ./bin/cgme ./cmd/cgme
 ```
 
-Current scaffold status:
+Current implementation status:
 
-* the CLI is runnable
-* config loading is scaffolded
-* export output generation is scaffolded
-* real ChatGPT parsing is not implemented yet
+* `bundle` export is usable
+* `project_url` export works on the current target path: macOS + Chrome + valid ChatGPT session cookie
+* the HTTP-only fetch path is kept as a fallback, but Cloudflare can block it
 
 ---
 
@@ -215,6 +214,13 @@ For users who do not want to learn configuration:
 cgme export --bundle ./chatgpt-export --output ./my-notes
 ```
 
+For a live ChatGPT conversation URL on macOS with Chrome and a valid session cookie:
+
+```bash
+export CGME_CHATGPT_SESSION_COOKIE='__Secure-next-auth.session-token=...'
+cgme export --project-url "https://chatgpt.com/..." --output ./my-notes
+```
+
 ### Repeatable mode
 
 For users who export regularly:
@@ -241,46 +247,51 @@ options:
   preserve_links: true
 ```
 
+## 🌐 Browser Runtime Notes
+
+`project_url` export is currently scoped to:
+
+* macOS
+* Google Chrome
+* ChatGPT
+* a valid session cookie supplied by the user
+
+Useful environment variables:
+
+* `CGME_CHATGPT_SESSION_COOKIE`
+  ChatGPT session cookie header used for live `project_url` export.
+* `CGME_BROWSER_WAIT_SECONDS`
+  Extra wait time after page navigation before DOM extraction
+* `CGME_CHROME_DEBUG_PORT`
+  Override the temporary Chrome DevTools port
+
+Known limitation:
+
+* direct HTTP requests to `chatgpt.com/backend-api/...` may be blocked by Cloudflare even with valid cookies, so browser-backed export remains the primary live URL path
+
 ---
 
-## 🧱 Suggested Repository Layout
+## 🧱 Current Repository Layout
 
-Until the first implementation lands, this is the recommended structure:
+Current layout:
 
 ```text
 .
 ├── cmd/
 │   └── cgme/
 ├── README.md
-├── docs/
-│   ├── architecture.md
-│   ├── pipeline.md
-│   └── sample-data/
 ├── internal/
 │   ├── cli/
-│   ├── exporters/
-│   ├── parsers/
-│   ├── math/
-│   ├── markdown/
-│   ├── assets/
-│   └── config/
-├── tests/
-│   ├── fixtures/
-│   ├── snapshots/
-│   └── integration/
-└── scripts/
+│   ├── config/
+│   └── exporters/
+└── go.mod
 ```
 
 Module intent:
 
 * `cli/`: command-line entry points and argument parsing
-* `exporters/`: data loading from official export bundle or project URL
-* `parsers/`: conversation tree parsing and message extraction
-* `math/`: formula detection, normalization, and warning generation
-* `markdown/`: Markdown rendering and output layout
-* `assets/`: image downloading, hashing, deduplication, and path rewriting
+* `exporters/`: bundle loading, live project URL fetching, Markdown rendering, and math-aware transforms
 * `config/`: config file loading, defaults, and validation
-* `tests/fixtures/`: representative exported conversations for regression coverage
 
 ---
 
@@ -327,7 +338,7 @@ Recommended order for implementation:
 5. Add local asset downloading and link rewriting
 6. Add Project URL import as a separate adapter layer
 
-This order keeps the highest-risk logic, math normalization and rendering correctness, testable before browser-driven collection is introduced.
+The next priority is export quality: improving message extraction, math rendering, and publish-ready Markdown while staying inside the current macOS + Chrome + ChatGPT scope.
 
 ---
 
@@ -430,7 +441,7 @@ this is a **math knowledge pipeline**.
 * 支持：
 
   * ChatGPT 官方导出数据（conversations.json）
-  * ChatGPT Project 页面（浏览器抓取）
+  * ChatGPT Project URL（提供有效 ChatGPT session cookie）
 * 支持按项目批量导出
 
 ---
@@ -464,7 +475,7 @@ this is a **math knowledge pipeline**.
 
 ---
 
-### 🖼 图片处理
+### 🖼 规划中的图片处理
 
 * 所有图片本地保存
 * 替换为相对路径
@@ -492,10 +503,10 @@ this is a **math knowledge pipeline**.
 
 ---
 
-### 🔗 外链保留
+### 🔗 当前链接处理
 
-* 保留论文 / 网站链接
-* 可选生成参考索引
+* 保留导出文本中原本存在的论文 / 网站链接
+* 参考索引尚未实现
 
 ---
 
@@ -527,15 +538,23 @@ cgme export --project-url "<你的项目URL>" --output ./out
 
 ## 🛠 当前开发状态
 
-这个仓库目前处于**项目初始化阶段**。
+这个仓库目前处于**早期可用阶段**。
 
-现在已经明确了产品目标、导出范围和核心能力，但代码仓库尚未正式搭建。当前实现方向已经确定：
+当前已经具备这些能力：
 
-* 主语言：**Go**
-* 最终产物：**单个本地可执行文件**
-* 运行方式：**命令行参数 + 可选配置文件**
-* 目标用户：**包括不懂编程的普通用户**
-* 核心目标：**从 ChatGPT 导入到本地目录，并让用户可直接 push 到 GitHub**
+* Go CLI 可直接运行
+* 支持从官方导出包 `conversations.json` 读取会话
+* 支持将会话导出为基础问答结构的 Markdown
+* 支持保守的数学符号标准化和 `warnings.json`
+* 支持在当前限定范围内做 Project URL 导出：
+  `macOS + Chrome + 有效 ChatGPT session cookie`
+
+仍未完成的部分：
+
+* 图片与其他资产下载
+* 更丰富的 ChatGPT 内容节点支持
+* 更稳健的公式识别与正文排版
+* 超出当前限定范围之外的平台支持
 
 ---
 
@@ -549,12 +568,11 @@ go run ./cmd/cgme export --bundle ./chatgpt-export --output ./out
 go build -o ./bin/cgme ./cmd/cgme
 ```
 
-当前骨架状态：
+当前实现状态：
 
-* CLI 已可运行
-* 配置文件加载骨架已建立
-* 导出目录生成骨架已建立
-* 真实的 ChatGPT 解析逻辑尚未实现
+* `bundle` 导出已经可用
+* `project_url` 导出在当前目标路径下可用：`macOS + Chrome + 有效 ChatGPT session cookie`
+* 纯 HTTP 抓取链路仍保留为 fallback，但可能被 Cloudflare 拦截
 
 ---
 
@@ -597,6 +615,13 @@ CGME 的目标是一个运行在用户本地机器上的工具，而不是在线
 cgme export --bundle ./chatgpt-export --output ./my-notes
 ```
 
+如果是实时 Project URL：
+
+```bash
+export CGME_CHATGPT_SESSION_COOKIE='__Secure-next-auth.session-token=...'
+cgme export --project-url "https://chatgpt.com/..." --output ./my-notes
+```
+
 ### 可复用模式
 
 给需要重复导出的用户：
@@ -625,44 +650,27 @@ options:
 
 ---
 
-## 🧱 建议目录结构
+## 🧱 当前仓库结构
 
-在第一版代码落地前，建议按下面的结构推进：
+当前仓库的高层结构：
 
 ```text
 .
 ├── cmd/
 │   └── cgme/
 ├── README.md
-├── docs/
-│   ├── architecture.md
-│   ├── pipeline.md
-│   └── sample-data/
 ├── internal/
 │   ├── cli/
-│   ├── exporters/
-│   ├── parsers/
-│   ├── math/
-│   ├── markdown/
-│   ├── assets/
-│   └── config/
-├── tests/
-│   ├── fixtures/
-│   ├── snapshots/
-│   └── integration/
-└── scripts/
+│   ├── config/
+│   └── exporters/
+└── go.mod
 ```
 
-各目录职责建议如下：
+各目录当前职责如下：
 
 * `cli/`：命令行入口和参数解析
-* `exporters/`：读取官方导出包或 Project URL 数据
-* `parsers/`：解析会话树，提取消息结构
-* `math/`：公式识别、标准化、warning 输出
-* `markdown/`：Markdown 渲染与输出组织
-* `assets/`：图片下载、哈希去重、路径替换
+* `exporters/`：官方导出解析、Project URL 抓取、Markdown 渲染与数学处理
 * `config/`：配置文件加载、默认值与校验
-* `tests/fixtures/`：用于回归测试的真实或脱敏样例
 
 ---
 
@@ -709,7 +717,7 @@ options:
 5. 加入图片本地化和引用替换
 6. 将 Project URL 导入作为单独适配层接入
 
-这个顺序可以先把高风险的“数学处理”和“Markdown 正确输出”做稳定，再去接浏览器抓取这种更脆弱的入口。
+接下来的重点不再是扩浏览器登录方式，而是把导出质量做扎实：消息抽取、数学排版、Markdown 成品感。
 
 ---
 

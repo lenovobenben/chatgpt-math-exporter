@@ -10,9 +10,9 @@ import (
 )
 
 type Config struct {
-	Source  SourceConfig  `json:"source"`
-	Output  OutputConfig  `json:"output"`
-	Options OptionConfig  `json:"options"`
+	Source  SourceConfig `json:"source"`
+	Output  OutputConfig `json:"output"`
+	Options OptionConfig `json:"options"`
 }
 
 type SourceConfig struct {
