@@ -4,9 +4,11 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/lihd/chatgpt-math-exporter/internal/config"
 )
 
-func renderConversationMarkdown(conv Conversation) (string, []warningRecord) {
+func renderConversationMarkdown(conv Conversation, opts config.OptionConfig) (string, []warningRecord) {
 	var b strings.Builder
 	warnings := make([]warningRecord, 0)
 
@@ -31,7 +33,10 @@ func renderConversationMarkdown(conv Conversation) (string, []warningRecord) {
 	for _, msg := range grouped {
 		b.WriteString(sectionTitle(msg.Role))
 		b.WriteString("\n\n")
-		normalized, msgWarnings := normalizeMathText(msg.Content)
+		normalized, msgWarnings := normalizeMathText(msg.Content, normalizeMathOptions{
+			Role:         msg.Role,
+			FixUserLatex: opts.FixUserLatex,
+		})
 		warnings = append(warnings, msgWarnings...)
 		b.WriteString(strings.TrimSpace(normalized))
 		b.WriteString("\n\n")

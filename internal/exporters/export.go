@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/lihd/chatgpt-math-exporter/internal/config"
 )
@@ -15,6 +16,36 @@ import (
 type warningRecord struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
+}
+
+type projectURLExportOptions struct {
+	AllowPlaceholder bool
+	Overwrite        bool
+}
+
+type batchExportReport struct {
+	SourceType string             `json:"source_type"`
+	URLList    string             `json:"url_list"`
+	UpdatedAt  string             `json:"updated_at"`
+	Summary    batchExportSummary `json:"summary"`
+	Entries    []batchExportEntry `json:"entries"`
+}
+
+type batchExportSummary struct {
+	Total   int `json:"total"`
+	Success int `json:"success"`
+	Failed  int `json:"failed"`
+	Skipped int `json:"skipped"`
+}
+
+type batchExportEntry struct {
+	Line        int    `json:"line"`
+	URL         string `json:"url"`
+	Status      string `json:"status"`
+	ProjectName string `json:"project_name,omitempty"`
+	OutputPath  string `json:"output_path,omitempty"`
+	Error       string `json:"error,omitempty"`
+	UpdatedAt   string `json:"updated_at"`
 }
 
 var projectFetcherFactory = NewProjectFetcher
@@ -60,7 +91,7 @@ func runBundleExport(cfg config.Config) error {
 	}
 
 	for i, conv := range filtered {
-		rendered, renderWarnings := renderConversationMarkdown(conv)
+		rendered, renderWarnings := renderConversationMarkdown(conv, cfg.Options)
 		warnings = append(warnings, qualifyWarnings(conv, renderWarnings)...)
 		filename := fmt.Sprintf("%03d_%s.md", i+1, slugify(conversationFileBase(conv.Title, i+1)))
 		if err := os.WriteFile(filepath.Join(projectDir, filename), []byte(rendered), 0o644); err != nil {
@@ -85,7 +116,10 @@ func runBundleExport(cfg config.Config) error {
 
 func runProjectURLExport(cfg config.Config) error {
 	fetcher := projectFetcherFactory(cfg)
-	result, err := exportProjectURL(cfg, fetcher, cfg.Source.ProjectURL)
+	result, err := exportProjectURL(cfg, fetcher, cfg.Source.ProjectURL, projectURLExportOptions{
+		AllowPlaceholder: true,
+		Overwrite:        cfg.Options.OverwriteExisting,
+	})
 	if err != nil {
 		return err
 	}
@@ -115,29 +149,81 @@ func runProjectURLListExport(cfg config.Config) error {
 	}
 
 	fetcher := projectFetcherFactory(cfg)
+	reportPath := filepath.Join(cfg.Output.Dir, "export-report.json")
+	report, err := loadBatchExportReport(reportPath, cfg.Source.URLList)
+	if err != nil {
+		return err
+	}
 	allWarnings := make([]warningRecord, 0, len(urls))
-	exportedCount := 0
-	placeholderCount := 0
 
 	for i, rawURL := range urls {
-		result, err := exportProjectURL(cfg, fetcher, rawURL)
+		if !cfg.Options.OverwriteExisting {
+			if entry, ok := report.completedEntry(rawURL); ok && strings.TrimSpace(entry.OutputPath) != "" && fileExists(entry.OutputPath) {
+				report.record(batchExportEntry{
+					Line:        i + 1,
+					URL:         rawURL,
+					Status:      "skipped_existing",
+					ProjectName: entry.ProjectName,
+					OutputPath:  entry.OutputPath,
+					UpdatedAt:   timeNowString(),
+				})
+				allWarnings = append(allWarnings, warningRecord{
+					Code:    "source.project_url_list.skipped_existing",
+					Message: fmt.Sprintf("Line %d URL %q was skipped because a successful export already exists at %q.", i+1, rawURL, entry.OutputPath),
+				})
+				if err := writeBatchExportReport(reportPath, report); err != nil {
+					return err
+				}
+				continue
+			}
+		}
+
+		result, err := exportProjectURL(cfg, fetcher, rawURL, projectURLExportOptions{
+			AllowPlaceholder: false,
+			Overwrite:        cfg.Options.OverwriteExisting,
+		})
+		allWarnings = append(allWarnings, result.warnings...)
 		if err != nil {
+			report.record(batchExportEntry{
+				Line:        i + 1,
+				URL:         rawURL,
+				Status:      "failed",
+				ProjectName: result.projectName,
+				OutputPath:  result.outputPath,
+				Error:       err.Error(),
+				UpdatedAt:   timeNowString(),
+			})
 			allWarnings = append(allWarnings, warningRecord{
-				Code:    "source.project_url_list.invalid_url",
+				Code:    "source.project_url_list.failed",
 				Message: fmt.Sprintf("Line %d URL %q could not be exported: %v", i+1, rawURL, err),
 			})
+			if err := writeBatchExportReport(reportPath, report); err != nil {
+				return err
+			}
 			continue
 		}
-		allWarnings = append(allWarnings, result.warnings...)
-		if result.placeholder {
-			placeholderCount++
+
+		status := "success"
+		if result.skipped {
+			status = "skipped_existing"
 		} else {
-			exportedCount += result.conversationCount
+			status = "success"
+		}
+		report.record(batchExportEntry{
+			Line:        i + 1,
+			URL:         rawURL,
+			Status:      status,
+			ProjectName: result.projectName,
+			OutputPath:  result.outputPath,
+			UpdatedAt:   timeNowString(),
+		})
+		if err := writeBatchExportReport(reportPath, report); err != nil {
+			return err
 		}
 	}
 
 	if cfg.Options.WriteReadme {
-		if err := writeOutputReadme(filepath.Join(cfg.Output.Dir, "README.md"), cfg, fmt.Sprintf("%d project URL(s)", len(urls)), exportedCount, placeholderCount > 0); err != nil {
+		if err := writeOutputReadme(filepath.Join(cfg.Output.Dir, "README.md"), cfg, fmt.Sprintf("%d project URL(s)", len(urls)), report.Summary.Success, false); err != nil {
 			return err
 		}
 	}
@@ -145,7 +231,7 @@ func runProjectURLListExport(cfg config.Config) error {
 	if cfg.Options.WriteWarnings {
 		allWarnings = append(allWarnings, warningRecord{
 			Code:    "source.project_url_list.completed",
-			Message: fmt.Sprintf("Processed %d project URL(s): %d exported, %d placeholder result(s).", len(urls), exportedCount, placeholderCount),
+			Message: fmt.Sprintf("Processed %d project URL(s): %d succeeded, %d failed, %d skipped.", len(urls), report.Summary.Success, report.Summary.Failed, report.Summary.Skipped),
 		})
 		if err := writeWarnings(filepath.Join(cfg.Output.Dir, "warnings.json"), allWarnings); err != nil {
 			return err
@@ -160,9 +246,11 @@ type projectURLExportResult struct {
 	conversationCount int
 	placeholder       bool
 	warnings          []warningRecord
+	outputPath        string
+	skipped           bool
 }
 
-func exportProjectURL(cfg config.Config, fetcher ProjectFetcher, rawURL string) (projectURLExportResult, error) {
+func exportProjectURL(cfg config.Config, fetcher ProjectFetcher, rawURL string, opts projectURLExportOptions) (projectURLExportResult, error) {
 	urlInfo, err := parseProjectURL(rawURL)
 	if err != nil {
 		return projectURLExportResult{}, err
@@ -177,10 +265,6 @@ func exportProjectURL(cfg config.Config, fetcher ProjectFetcher, rawURL string) 
 	if cfg.Source.Project == "" && strings.TrimSpace(fetched.ProjectName) != "" {
 		projectName = fetched.ProjectName
 	}
-	projectDir := filepath.Join(cfg.Output.Dir, slugify(projectName))
-	if err := os.MkdirAll(projectDir, 0o755); err != nil {
-		return projectURLExportResult{}, fmt.Errorf("create project directory %q: %w", projectDir, err)
-	}
 
 	warnings := []warningRecord{
 		{
@@ -188,14 +272,16 @@ func exportProjectURL(cfg config.Config, fetcher ProjectFetcher, rawURL string) 
 			Message: fmt.Sprintf("Recognized URL host=%q path_type=%q conversation_id=%q.", urlInfo.Host, urlInfo.PathType, emptyFallback(urlInfo.ConversationID)),
 		},
 	}
-	placeholder := true
 	conversationCount := 1
 
 	if fetchErr == nil && len(fetched.Messages) > 0 {
-		placeholder = false
 		conv := conversationFromFetched(urlInfo, fetched)
+		projectDir := filepath.Join(cfg.Output.Dir, slugify(projectName))
+		if err := os.MkdirAll(projectDir, 0o755); err != nil {
+			return projectURLExportResult{}, fmt.Errorf("create project directory %q: %w", projectDir, err)
+		}
 		warnings = append(warnings, fetched.Warnings...)
-		rendered, renderWarnings := renderConversationMarkdown(conv)
+		rendered, renderWarnings := renderConversationMarkdown(conv, cfg.Options)
 		warnings = append(warnings, qualifyWarnings(conv, renderWarnings)...)
 		warnings = append(warnings, warningRecord{
 			Code:    "source.project_url.fetch_success",
@@ -203,7 +289,22 @@ func exportProjectURL(cfg config.Config, fetcher ProjectFetcher, rawURL string) 
 		})
 
 		filename := fmt.Sprintf("%03d_%s.md", 1, slugify(conversationFileBase(conv.Title, 1)))
-		if err := os.WriteFile(filepath.Join(projectDir, filename), []byte(rendered), 0o644); err != nil {
+		outputPath := filepath.Join(projectDir, filename)
+		if !opts.Overwrite && fileExists(outputPath) {
+			warnings = append(warnings, warningRecord{
+				Code:    "source.project_url.skipped_existing",
+				Message: fmt.Sprintf("Skipped writing %q because it already exists.", outputPath),
+			})
+			return projectURLExportResult{
+				projectName:       projectName,
+				conversationCount: 0,
+				placeholder:       false,
+				warnings:          warnings,
+				outputPath:        outputPath,
+				skipped:           true,
+			}, nil
+		}
+		if err := os.WriteFile(outputPath, []byte(rendered), 0o644); err != nil {
 			return projectURLExportResult{}, fmt.Errorf("write conversation markdown %q: %w", filename, err)
 		}
 		placeholderPath := filepath.Join(projectDir, "001_placeholder.md")
@@ -228,9 +329,46 @@ func exportProjectURL(cfg config.Config, fetcher ProjectFetcher, rawURL string) 
 				return projectURLExportResult{}, fmt.Errorf("remove legacy placeholder %q: %w", legacyPlaceholderPath, err)
 			}
 		}
+		return projectURLExportResult{
+			projectName:       projectName,
+			conversationCount: conversationCount,
+			placeholder:       false,
+			warnings:          warnings,
+			outputPath:        outputPath,
+		}, nil
 	} else {
-		if err := writePlaceholderConversation(filepath.Join(projectDir, "001_placeholder.md"), cfg, projectName, urlInfo, fetchErr, rawURL); err != nil {
-			return projectURLExportResult{}, err
+		if opts.AllowPlaceholder {
+			if fetchErr != nil {
+				if warning, ok := warningFromError(fetchErr); ok {
+					warnings = append(warnings, warning)
+				} else {
+					warnings = append(warnings, warningRecord{
+						Code:    "source.project_url.fetch_failed",
+						Message: fetchErr.Error(),
+					})
+				}
+			}
+			if fetchErr == nil && len(fetched.Messages) == 0 {
+				warnings = append(warnings, warningRecord{
+					Code:    "source.project_url.empty_result",
+					Message: "Project URL fetch returned no messages. A placeholder file was generated instead.",
+				})
+			}
+			projectDir := filepath.Join(cfg.Output.Dir, slugify(projectName))
+			if err := os.MkdirAll(projectDir, 0o755); err != nil {
+				return projectURLExportResult{}, fmt.Errorf("create project directory %q: %w", projectDir, err)
+			}
+			placeholderPath := filepath.Join(projectDir, "001_placeholder.md")
+			if err := writePlaceholderConversation(placeholderPath, cfg, projectName, urlInfo, fetchErr, rawURL); err != nil {
+				return projectURLExportResult{}, err
+			}
+			return projectURLExportResult{
+				projectName:       projectName,
+				conversationCount: conversationCount,
+				placeholder:       true,
+				warnings:          warnings,
+				outputPath:        placeholderPath,
+			}, nil
 		}
 	}
 
@@ -243,20 +381,22 @@ func exportProjectURL(cfg config.Config, fetcher ProjectFetcher, rawURL string) 
 				Message: fetchErr.Error(),
 			})
 		}
+		return projectURLExportResult{
+			projectName: projectName,
+			warnings:    warnings,
+		}, fetchErr
 	}
 	if fetchErr == nil && len(fetched.Messages) == 0 {
 		warnings = append(warnings, warningRecord{
 			Code:    "source.project_url.empty_result",
-			Message: "Project URL fetch returned no messages. A placeholder file was generated instead.",
+			Message: "Project URL fetch returned no messages.",
 		})
+		return projectURLExportResult{
+			projectName: projectName,
+			warnings:    warnings,
+		}, fmt.Errorf("project URL fetch returned no messages")
 	}
-
-	return projectURLExportResult{
-		projectName:       projectName,
-		conversationCount: conversationCount,
-		placeholder:       placeholder,
-		warnings:          warnings,
-	}, nil
+	return projectURLExportResult{}, nil
 }
 
 func conversationFromFetched(urlInfo ProjectURLInfo, fetched FetchedConversation) Conversation {
@@ -389,6 +529,91 @@ func writeWarnings(path string, warnings []warningRecord) error {
 		return fmt.Errorf("write warnings %q: %w", path, err)
 	}
 	return nil
+}
+
+func loadBatchExportReport(path, urlList string) (batchExportReport, error) {
+	report := batchExportReport{
+		SourceType: "project_url_list",
+		URLList:    urlList,
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return report, nil
+		}
+		return batchExportReport{}, fmt.Errorf("read export report %q: %w", path, err)
+	}
+	if err := json.Unmarshal(data, &report); err != nil {
+		return batchExportReport{}, fmt.Errorf("parse export report %q: %w", path, err)
+	}
+	if report.SourceType == "" {
+		report.SourceType = "project_url_list"
+	}
+	if report.URLList == "" {
+		report.URLList = urlList
+	}
+	report.recomputeSummary()
+	return report, nil
+}
+
+func writeBatchExportReport(path string, report batchExportReport) error {
+	report.UpdatedAt = timeNowString()
+	report.recomputeSummary()
+	data, err := json.MarshalIndent(report, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal export report: %w", err)
+	}
+	if err := os.WriteFile(path, append(data, '\n'), 0o644); err != nil {
+		return fmt.Errorf("write export report %q: %w", path, err)
+	}
+	return nil
+}
+
+func (r *batchExportReport) record(entry batchExportEntry) {
+	for i := range r.Entries {
+		if r.Entries[i].URL == entry.URL {
+			r.Entries[i] = entry
+			r.recomputeSummary()
+			return
+		}
+	}
+	r.Entries = append(r.Entries, entry)
+	r.recomputeSummary()
+}
+
+func (r batchExportReport) completedEntry(rawURL string) (batchExportEntry, bool) {
+	for _, entry := range r.Entries {
+		if entry.URL != rawURL {
+			continue
+		}
+		if entry.Status == "success" || entry.Status == "skipped_existing" {
+			return entry, true
+		}
+	}
+	return batchExportEntry{}, false
+}
+
+func (r *batchExportReport) recomputeSummary() {
+	r.Summary = batchExportSummary{Total: len(r.Entries)}
+	for _, entry := range r.Entries {
+		switch entry.Status {
+		case "success":
+			r.Summary.Success++
+		case "failed":
+			r.Summary.Failed++
+		case "skipped_existing":
+			r.Summary.Skipped++
+		}
+	}
+}
+
+func timeNowString() string {
+	return time.Now().UTC().Format(time.RFC3339)
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 func qualifyWarnings(conv Conversation, warnings []warningRecord) []warningRecord {

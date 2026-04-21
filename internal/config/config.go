@@ -30,9 +30,11 @@ type OutputConfig struct {
 }
 
 type OptionConfig struct {
-	WriteReadme   bool `json:"write_readme"`
-	WriteWarnings bool `json:"write_warnings"`
-	PreserveLinks bool `json:"preserve_links"`
+	WriteReadme       bool `json:"write_readme"`
+	WriteWarnings     bool `json:"write_warnings"`
+	PreserveLinks     bool `json:"preserve_links"`
+	OverwriteExisting bool `json:"overwrite_existing"`
+	FixUserLatex      bool `json:"fix_user_latex"`
 }
 
 func Default() Config {
@@ -41,9 +43,11 @@ func Default() Config {
 			Dir: "./output",
 		},
 		Options: OptionConfig{
-			WriteReadme:   true,
-			WriteWarnings: true,
-			PreserveLinks: true,
+			WriteReadme:       true,
+			WriteWarnings:     true,
+			PreserveLinks:     true,
+			OverwriteExisting: false,
+			FixUserLatex:      false,
 		},
 	}
 }

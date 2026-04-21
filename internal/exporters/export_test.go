@@ -2,6 +2,7 @@ package exporters
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -135,7 +136,7 @@ func TestNormalizeMathTextPreservesCodeFencesAndInlineCode(t *testing.T) {
 		"Inline code stays: `x ≤ y` but normal text keeps z ∈ A.",
 	}, "\n")
 
-	got, _ := normalizeMathText(input)
+	got, _ := normalizeMathText(input, normalizeMathOptions{})
 
 	if !strings.Contains(got, `Outside code: a \le b and x \to y.`) {
 		t.Fatalf("expected normalized plain text, got: %s", got)
@@ -161,7 +162,7 @@ func TestNormalizeMathTextWrapsStandaloneMathLines(t *testing.T) {
 		"This sentence should stay plain text.",
 	}, "\n")
 
-	got, warnings := normalizeMathText(input)
+	got, warnings := normalizeMathText(input, normalizeMathOptions{})
 
 	if !strings.Contains(got, "```math\nx^2 - 1 = 0\nx = \\pm1\n```") {
 		t.Fatalf("expected math block wrapping, got: %s", got)
@@ -171,6 +172,68 @@ func TestNormalizeMathTextWrapsStandaloneMathLines(t *testing.T) {
 	}
 	if len(warnings) == 0 {
 		t.Fatalf("expected math warnings to be emitted")
+	}
+}
+
+func TestNormalizeMathTextDoesNotWrapProseLineContainingInlineMath(t *testing.T) {
+	input := strings.Join([]string{
+		"4. 为什么这个 $P$ 一定最小（结论闭环）",
+		"由作法第 8–9 步，点 $P$ 满足 $OP=1$ 且在第一象限，并且它在 $OA$ 方向的投影为",
+		"cos\\theta=OC=\\frac{1+\\sqrt7}{4}",
+	}, "\n")
+
+	got, _ := normalizeMathText(input, normalizeMathOptions{})
+
+	if strings.Contains(got, "```math\n由作法第 8–9 步") {
+		t.Fatalf("prose line with inline math should not be wrapped as a math block: %s", got)
+	}
+	if !strings.Contains(got, "cos\\theta=OC=\\frac{1+\\sqrt7}{4}") {
+		t.Fatalf("formula line should remain present: %s", got)
+	}
+}
+
+func TestNormalizeMathTextFixesObviousUserLatexSpans(t *testing.T) {
+	input := "请化简 \\frac{a+b}{c} 并比较 \\sqrt{5} 与 \\sqrt{2}."
+
+	got, warnings := normalizeMathText(input, normalizeMathOptions{
+		Role:         "user",
+		FixUserLatex: true,
+	})
+
+	if !strings.Contains(got, "请化简 $\\frac{a+b}{c}$ 并比较 $\\sqrt{5}$ 与 $\\sqrt{2}$.") {
+		t.Fatalf("expected obvious user latex spans to be wrapped, got: %s", got)
+	}
+	if !strings.Contains(fmt.Sprintf("%v", warnings), "math.user_latex_wrapped") {
+		t.Fatalf("expected user latex warning, got: %#v", warnings)
+	}
+}
+
+func TestNormalizeMathTextDoesNotTouchAssistantLatexSpans(t *testing.T) {
+	input := "请化简 \\frac{a+b}{c}."
+
+	got, _ := normalizeMathText(input, normalizeMathOptions{
+		Role:         "assistant",
+		FixUserLatex: true,
+	})
+
+	if got != input {
+		t.Fatalf("assistant content should remain unchanged, got: %s", got)
+	}
+}
+
+func TestNormalizeMathTextDoesNotDoubleWrapExistingUserMath(t *testing.T) {
+	input := "这里已经有 $\\frac{a+b}{c}$ 了。"
+
+	got, _ := normalizeMathText(input, normalizeMathOptions{
+		Role:         "user",
+		FixUserLatex: true,
+	})
+
+	if strings.Contains(got, "```math\n由作法第 8–9 步") {
+		t.Fatalf("existing user math should not be turned into block math: %s", got)
+	}
+	if got != input {
+		t.Fatalf("existing user math should remain unchanged, got: %s", got)
 	}
 }
 
@@ -185,7 +248,7 @@ func TestRenderConversationMarkdownMergesConsecutiveSameRoleSections(t *testing.
 		},
 	}
 
-	got, _ := renderConversationMarkdown(conv)
+	got, _ := renderConversationMarkdown(conv, config.OptionConfig{})
 
 	if strings.Count(got, "## Answer") != 1 {
 		t.Fatalf("expected one merged answer section, got: %s", got)
@@ -575,6 +638,251 @@ func TestRunProjectURLListExportWritesMultipleConversations(t *testing.T) {
 	if !strings.Contains(string(warningsContent), "source.project_url_list.completed") {
 		t.Fatalf("expected batch completion warning: %s", string(warningsContent))
 	}
+
+	reportContent, err := os.ReadFile(filepath.Join(outputDir, "export-report.json"))
+	if err != nil {
+		t.Fatalf("read export report: %v", err)
+	}
+	var report batchExportReport
+	if err := json.Unmarshal(reportContent, &report); err != nil {
+		t.Fatalf("unmarshal export report: %v", err)
+	}
+	if report.Summary.Success != 2 || report.Summary.Failed != 0 || report.Summary.Skipped != 0 {
+		t.Fatalf("unexpected report summary: %#v", report.Summary)
+	}
+}
+
+func TestRunProjectURLListExportContinuesAndDoesNotWritePlaceholderOnFailure(t *testing.T) {
+	outputDir := t.TempDir()
+	urlListPath := filepath.Join(t.TempDir(), "urls.txt")
+	if err := os.WriteFile(urlListPath, []byte(strings.Join([]string{
+		"https://chatgpt.com/g/g-p-1/c/conv-1",
+		"https://chatgpt.com/g/g-p-1/c/conv-2",
+	}, "\n")), 0o644); err != nil {
+		t.Fatalf("write url list: %v", err)
+	}
+
+	originalFactory := projectFetcherFactory
+	projectFetcherFactory = func(cfg config.Config) ProjectFetcher {
+		return routedStubProjectFetcher{
+			routes: map[string]FetchedConversation{
+				"conv-1": {
+					ProjectName: "Problem One",
+					Messages: []Message{
+						{Role: "user", Content: "Question 1"},
+						{Role: "assistant", Content: "Answer 1"},
+					},
+				},
+			},
+			errByConversation: map[string]error{
+				"conv-2": &ProjectFetchError{
+					Code:    "source.project_url.auth_failed",
+					Message: "Auth failed",
+				},
+			},
+		}
+	}
+	defer func() {
+		projectFetcherFactory = originalFactory
+	}()
+
+	cfg := config.Config{
+		Source: config.SourceConfig{
+			Type:    "project_url_list",
+			URLList: urlListPath,
+		},
+		Output: config.OutputConfig{
+			Dir:       outputDir,
+			AssetsDir: filepath.Join(outputDir, "assets"),
+		},
+		Options: config.OptionConfig{
+			WriteReadme:   true,
+			WriteWarnings: true,
+			PreserveLinks: true,
+		},
+	}
+
+	if err := Run(cfg); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(outputDir, "problem-one", "001_problem-one.md")); err != nil {
+		t.Fatalf("expected successful export: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(outputDir, "problem-two", "001_placeholder.md")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("did not expect placeholder for failed batch item, err=%v", err)
+	}
+
+	reportContent, err := os.ReadFile(filepath.Join(outputDir, "export-report.json"))
+	if err != nil {
+		t.Fatalf("read export report: %v", err)
+	}
+	var report batchExportReport
+	if err := json.Unmarshal(reportContent, &report); err != nil {
+		t.Fatalf("unmarshal export report: %v", err)
+	}
+	if report.Summary.Success != 1 || report.Summary.Failed != 1 {
+		t.Fatalf("unexpected report summary: %#v", report.Summary)
+	}
+}
+
+func TestRunProjectURLListExportSkipsCompletedEntriesByDefault(t *testing.T) {
+	outputDir := t.TempDir()
+	urlListPath := filepath.Join(t.TempDir(), "urls.txt")
+	rawURL := "https://chatgpt.com/g/g-p-1/c/conv-1"
+	if err := os.WriteFile(urlListPath, []byte(rawURL+"\n"), 0o644); err != nil {
+		t.Fatalf("write url list: %v", err)
+	}
+
+	projectDir := filepath.Join(outputDir, "problem-one")
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatalf("mkdir project dir: %v", err)
+	}
+	outputPath := filepath.Join(projectDir, "001_problem-one.md")
+	if err := os.WriteFile(outputPath, []byte("existing"), 0o644); err != nil {
+		t.Fatalf("write existing export: %v", err)
+	}
+	existingReport := batchExportReport{
+		SourceType: "project_url_list",
+		URLList:    urlListPath,
+		Entries: []batchExportEntry{
+			{
+				Line:        1,
+				URL:         rawURL,
+				Status:      "success",
+				ProjectName: "Problem One",
+				OutputPath:  outputPath,
+				UpdatedAt:   timeNowString(),
+			},
+		},
+	}
+	if err := writeBatchExportReport(filepath.Join(outputDir, "export-report.json"), existingReport); err != nil {
+		t.Fatalf("write existing report: %v", err)
+	}
+
+	originalFactory := projectFetcherFactory
+	projectFetcherFactory = func(cfg config.Config) ProjectFetcher {
+		return routedStubProjectFetcher{
+			err: errors.New("fetcher should not be called for skipped entry"),
+		}
+	}
+	defer func() {
+		projectFetcherFactory = originalFactory
+	}()
+
+	cfg := config.Config{
+		Source: config.SourceConfig{
+			Type:    "project_url_list",
+			URLList: urlListPath,
+		},
+		Output: config.OutputConfig{
+			Dir:       outputDir,
+			AssetsDir: filepath.Join(outputDir, "assets"),
+		},
+		Options: config.OptionConfig{
+			WriteReadme:   true,
+			WriteWarnings: true,
+			PreserveLinks: true,
+		},
+	}
+
+	if err := Run(cfg); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	reportContent, err := os.ReadFile(filepath.Join(outputDir, "export-report.json"))
+	if err != nil {
+		t.Fatalf("read export report: %v", err)
+	}
+	var report batchExportReport
+	if err := json.Unmarshal(reportContent, &report); err != nil {
+		t.Fatalf("unmarshal export report: %v", err)
+	}
+	if report.Summary.Skipped != 1 || report.Entries[0].Status != "skipped_existing" {
+		t.Fatalf("unexpected skipped report state: %#v", report)
+	}
+}
+
+func TestRunProjectURLListExportOverwriteRefetches(t *testing.T) {
+	outputDir := t.TempDir()
+	urlListPath := filepath.Join(t.TempDir(), "urls.txt")
+	rawURL := "https://chatgpt.com/g/g-p-1/c/conv-1"
+	if err := os.WriteFile(urlListPath, []byte(rawURL+"\n"), 0o644); err != nil {
+		t.Fatalf("write url list: %v", err)
+	}
+
+	projectDir := filepath.Join(outputDir, "problem-one")
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatalf("mkdir project dir: %v", err)
+	}
+	outputPath := filepath.Join(projectDir, "001_problem-one.md")
+	if err := os.WriteFile(outputPath, []byte("old"), 0o644); err != nil {
+		t.Fatalf("write existing export: %v", err)
+	}
+	existingReport := batchExportReport{
+		SourceType: "project_url_list",
+		URLList:    urlListPath,
+		Entries: []batchExportEntry{
+			{
+				Line:        1,
+				URL:         rawURL,
+				Status:      "success",
+				ProjectName: "Problem One",
+				OutputPath:  outputPath,
+				UpdatedAt:   timeNowString(),
+			},
+		},
+	}
+	if err := writeBatchExportReport(filepath.Join(outputDir, "export-report.json"), existingReport); err != nil {
+		t.Fatalf("write existing report: %v", err)
+	}
+
+	originalFactory := projectFetcherFactory
+	projectFetcherFactory = func(cfg config.Config) ProjectFetcher {
+		return routedStubProjectFetcher{
+			routes: map[string]FetchedConversation{
+				"conv-1": {
+					ProjectName: "Problem One",
+					Messages: []Message{
+						{Role: "user", Content: "Question 1"},
+						{Role: "assistant", Content: "New Answer"},
+					},
+				},
+			},
+		}
+	}
+	defer func() {
+		projectFetcherFactory = originalFactory
+	}()
+
+	cfg := config.Config{
+		Source: config.SourceConfig{
+			Type:    "project_url_list",
+			URLList: urlListPath,
+		},
+		Output: config.OutputConfig{
+			Dir:       outputDir,
+			AssetsDir: filepath.Join(outputDir, "assets"),
+		},
+		Options: config.OptionConfig{
+			WriteReadme:       true,
+			WriteWarnings:     true,
+			PreserveLinks:     true,
+			OverwriteExisting: true,
+		},
+	}
+
+	if err := Run(cfg); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	content, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatalf("read overwritten export: %v", err)
+	}
+	if !strings.Contains(string(content), "New Answer") {
+		t.Fatalf("expected overwritten export content, got: %s", string(content))
+	}
 }
 
 func TestProjectFetcherBuildsConversationRequest(t *testing.T) {
@@ -937,13 +1245,17 @@ func (s stubProjectFetcher) FetchConversation(ctx context.Context, info ProjectU
 }
 
 type routedStubProjectFetcher struct {
-	routes map[string]FetchedConversation
-	err    error
+	routes            map[string]FetchedConversation
+	err               error
+	errByConversation map[string]error
 }
 
 func (s routedStubProjectFetcher) FetchConversation(ctx context.Context, info ProjectURLInfo) (FetchedConversation, error) {
 	if s.err != nil {
 		return FetchedConversation{}, s.err
+	}
+	if err, ok := s.errByConversation[info.ConversationID]; ok {
+		return FetchedConversation{}, err
 	}
 	if fetched, ok := s.routes[info.ConversationID]; ok {
 		return fetched, nil
