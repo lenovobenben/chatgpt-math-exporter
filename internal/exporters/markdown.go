@@ -33,10 +33,7 @@ func renderConversationMarkdown(conv Conversation, opts config.OptionConfig) (st
 	for _, msg := range grouped {
 		b.WriteString(sectionTitle(msg.Role))
 		b.WriteString("\n\n")
-		normalized, msgWarnings := normalizeMathText(msg.Content, normalizeMathOptions{
-			Role:         msg.Role,
-			FixUserLatex: opts.FixUserLatex,
-		})
+		normalized, msgWarnings := normalizeMathText(msg.Content, normalizeMathOptions{})
 		warnings = append(warnings, msgWarnings...)
 		b.WriteString(strings.TrimSpace(normalized))
 		b.WriteString("\n\n")

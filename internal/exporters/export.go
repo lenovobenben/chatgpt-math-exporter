@@ -5,8 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"mime"
+	"net/http"
+	neturl "net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -49,6 +54,10 @@ type batchExportEntry struct {
 }
 
 var projectFetcherFactory = NewProjectFetcher
+var imageMarkerPattern = regexp.MustCompile(`\[\[CGME_IMAGE:(\{.*?\})\]\]`)
+var newAssetHTTPClient = func() *http.Client {
+	return &http.Client{Timeout: 30 * time.Second}
+}
 
 func Run(cfg config.Config) error {
 	if err := os.MkdirAll(cfg.Output.Dir, 0o755); err != nil {
@@ -94,7 +103,13 @@ func runBundleExport(cfg config.Config) error {
 		rendered, renderWarnings := renderConversationMarkdown(conv, cfg.Options)
 		warnings = append(warnings, qualifyWarnings(conv, renderWarnings)...)
 		filename := fmt.Sprintf("%03d_%s.md", i+1, slugify(conversationFileBase(conv.Title, i+1)))
-		if err := os.WriteFile(filepath.Join(projectDir, filename), []byte(rendered), 0o644); err != nil {
+		outputPath := filepath.Join(projectDir, filename)
+		rendered, assetWarnings, err := materializeMarkdownAssets(rendered, outputPath, cfg.Output.AssetsDir, "")
+		if err != nil {
+			return fmt.Errorf("materialize conversation assets %q: %w", filename, err)
+		}
+		warnings = append(warnings, qualifyWarnings(conv, assetWarnings)...)
+		if err := os.WriteFile(outputPath, []byte(rendered), 0o644); err != nil {
 			return fmt.Errorf("write conversation markdown %q: %w", filename, err)
 		}
 	}
@@ -304,6 +319,12 @@ func exportProjectURL(cfg config.Config, fetcher ProjectFetcher, rawURL string, 
 				skipped:           true,
 			}, nil
 		}
+		sessionCookie, _ := resolveSessionCookie(cfg)
+		rendered, assetWarnings, err := materializeMarkdownAssets(rendered, outputPath, cfg.Output.AssetsDir, sessionCookie)
+		if err != nil {
+			return projectURLExportResult{}, fmt.Errorf("materialize conversation assets %q: %w", filename, err)
+		}
+		warnings = append(warnings, qualifyWarnings(conv, assetWarnings)...)
 		if err := os.WriteFile(outputPath, []byte(rendered), 0o644); err != nil {
 			return projectURLExportResult{}, fmt.Errorf("write conversation markdown %q: %w", filename, err)
 		}
@@ -529,6 +550,174 @@ func writeWarnings(path string, warnings []warningRecord) error {
 		return fmt.Errorf("write warnings %q: %w", path, err)
 	}
 	return nil
+}
+
+type imageMarker struct {
+	Src string `json:"src"`
+	Alt string `json:"alt"`
+}
+
+func materializeMarkdownAssets(markdown, outputPath, assetsDir, cookieHeader string) (string, []warningRecord, error) {
+	matches := imageMarkerPattern.FindAllStringSubmatchIndex(markdown, -1)
+	if len(matches) == 0 {
+		return markdown, nil, nil
+	}
+
+	assetDir := filepath.Join(assetsDir, slugify(strings.TrimSuffix(filepath.Base(outputPath), filepath.Ext(outputPath))))
+	if err := os.MkdirAll(assetDir, 0o755); err != nil {
+		return "", nil, fmt.Errorf("create asset directory %q: %w", assetDir, err)
+	}
+
+	client := newAssetHTTPClient()
+	cache := make(map[string]string)
+	var b strings.Builder
+	last := 0
+	warnings := make([]warningRecord, 0)
+	savedCount := 0
+
+	for i, match := range matches {
+		b.WriteString(markdown[last:match[0]])
+		last = match[1]
+
+		var marker imageMarker
+		if err := json.Unmarshal([]byte(markdown[match[2]:match[3]]), &marker); err != nil {
+			warnings = append(warnings, warningRecord{
+				Code:    "asset.image_marker_invalid",
+				Message: fmt.Sprintf("Skipped an invalid embedded image marker near %q.", outputPath),
+			})
+			continue
+		}
+		src := strings.TrimSpace(marker.Src)
+		alt := strings.TrimSpace(marker.Alt)
+		if src == "" {
+			warnings = append(warnings, warningRecord{
+				Code:    "asset.image_src_missing",
+				Message: fmt.Sprintf("Skipped an embedded image without a source near %q.", outputPath),
+			})
+			continue
+		}
+
+		relativePath, cached := cache[src]
+		if !cached {
+			savedPath, err := downloadImageAsset(client, src, assetDir, i+1, cookieHeader)
+			if err != nil {
+				warnings = append(warnings, warningRecord{
+					Code:    "asset.image_download_failed",
+					Message: fmt.Sprintf("Could not download image %q: %v. Kept the remote link instead.", src, err),
+				})
+				b.WriteString(renderImageMarkdown(alt, src))
+				continue
+			}
+			relativePath, err = filepath.Rel(filepath.Dir(outputPath), savedPath)
+			if err != nil {
+				return "", nil, fmt.Errorf("build relative asset path for %q: %w", savedPath, err)
+			}
+			relativePath = filepath.ToSlash(relativePath)
+			cache[src] = relativePath
+			savedCount++
+		}
+
+		b.WriteString(renderImageMarkdown(alt, relativePath))
+	}
+	b.WriteString(markdown[last:])
+
+	if savedCount > 0 {
+		warnings = append(warnings, warningRecord{
+			Code:    "asset.image_saved",
+			Message: fmt.Sprintf("Saved %d image asset(s) into %q.", savedCount, assetDir),
+		})
+	}
+	return b.String(), warnings, nil
+}
+
+func downloadImageAsset(client *http.Client, rawURL, assetDir string, index int, cookieHeader string) (string, error) {
+	parsed, err := neturl.Parse(strings.TrimSpace(rawURL))
+	if err != nil {
+		return "", fmt.Errorf("parse image URL: %w", err)
+	}
+	req, err := http.NewRequest(http.MethodGet, parsed.String(), nil)
+	if err != nil {
+		return "", fmt.Errorf("build image request: %w", err)
+	}
+	req.Header.Set("User-Agent", "CGME/0.1")
+	if strings.EqualFold(parsed.Hostname(), "chatgpt.com") && strings.TrimSpace(cookieHeader) != "" {
+		req.Header.Set("Cookie", cookieHeader)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("read image body: %w", err)
+	}
+	ext := inferImageExtension(parsed, resp.Header.Get("Content-Type"), data)
+	filename := fmt.Sprintf("image-%03d%s", index, ext)
+	outputPath := filepath.Join(assetDir, filename)
+	if err := os.WriteFile(outputPath, data, 0o644); err != nil {
+		return "", fmt.Errorf("write image asset: %w", err)
+	}
+	return outputPath, nil
+}
+
+func inferImageExtension(u *neturl.URL, contentType string, data []byte) string {
+	ext := strings.ToLower(filepath.Ext(u.Path))
+	switch ext {
+	case ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp":
+		return ext
+	}
+
+	contentType = strings.TrimSpace(strings.ToLower(strings.Split(contentType, ";")[0]))
+	switch contentType {
+	case "image/png":
+		return ".png"
+	case "image/jpeg":
+		return ".jpg"
+	case "image/gif":
+		return ".gif"
+	case "image/webp":
+		return ".webp"
+	case "image/svg+xml":
+		return ".svg"
+	case "image/bmp":
+		return ".bmp"
+	}
+
+	if strings.HasPrefix(contentType, "image/") {
+		if exts, _ := mime.ExtensionsByType(contentType); len(exts) > 0 {
+			return exts[0]
+		}
+	}
+	if len(data) > 0 {
+		switch http.DetectContentType(data) {
+		case "image/png":
+			return ".png"
+		case "image/jpeg":
+			return ".jpg"
+		case "image/gif":
+			return ".gif"
+		case "image/webp":
+			return ".webp"
+		}
+	}
+	return ".bin"
+}
+
+func renderImageMarkdown(alt, target string) string {
+	alt = strings.ReplaceAll(alt, "\n", " ")
+	alt = strings.TrimSpace(alt)
+	if alt == "" {
+		alt = "image"
+	}
+	alt = strings.ReplaceAll(alt, "]", `\]`)
+	target = strings.TrimSpace(target)
+	return fmt.Sprintf("![%s](%s)", alt, target)
 }
 
 func loadBatchExportReport(path, urlList string) (batchExportReport, error) {

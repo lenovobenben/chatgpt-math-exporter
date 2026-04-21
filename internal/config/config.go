@@ -34,7 +34,6 @@ type OptionConfig struct {
 	WriteWarnings     bool `json:"write_warnings"`
 	PreserveLinks     bool `json:"preserve_links"`
 	OverwriteExisting bool `json:"overwrite_existing"`
-	FixUserLatex      bool `json:"fix_user_latex"`
 }
 
 func Default() Config {
@@ -47,7 +46,6 @@ func Default() Config {
 			WriteWarnings:     true,
 			PreserveLinks:     true,
 			OverwriteExisting: false,
-			FixUserLatex:      false,
 		},
 	}
 }

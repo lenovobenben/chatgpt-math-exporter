@@ -330,7 +330,29 @@ func runCDPDOMExtraction(ctx context.Context, port int, pageURL, cookieHeader st
       const replacement = document.createTextNode(tex ? "$" + tex + "$" : (el.textContent || ''));
       el.replaceWith(replacement);
     });
-    clone.querySelectorAll('button, svg, script, style').forEach((el) => el.remove());
+    clone.querySelectorAll('img').forEach((el) => {
+      const src = (el.currentSrc || el.getAttribute('src') || '').trim();
+      if (!src) {
+        el.remove();
+        return;
+      }
+      const alt = (el.getAttribute('alt') || el.getAttribute('aria-label') || el.getAttribute('title') || '').trim();
+      const marker = "[[CGME_IMAGE:" + JSON.stringify({ src, alt }) + "]]";
+      el.replaceWith(document.createTextNode("\n" + marker + "\n"));
+    });
+    clone.querySelectorAll('picture, source').forEach((el) => {
+      if (el.querySelector && el.querySelector('img')) return;
+      el.remove();
+    });
+    clone.querySelectorAll('button').forEach((el) => {
+      const text = (el.textContent || '').trim();
+      if (text.includes('[[CGME_IMAGE:')) {
+        el.replaceWith(document.createTextNode("\n" + text + "\n"));
+        return;
+      }
+      el.remove();
+    });
+    clone.querySelectorAll('svg, script, style').forEach((el) => el.remove());
     return (clone.innerText || '').trim();
   };
   const roleNodes = Array.from(document.querySelectorAll('[data-message-author-role]'));

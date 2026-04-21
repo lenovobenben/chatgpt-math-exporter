@@ -73,8 +73,6 @@ func parseSimpleYAML(data []byte, cfg *Config) error {
 				cfg.Options.PreserveLinks = parseBool(value)
 			case "overwrite_existing":
 				cfg.Options.OverwriteExisting = parseBool(value)
-			case "fix_user_latex":
-				cfg.Options.FixUserLatex = parseBool(value)
 			default:
 				return fmt.Errorf("line %d: unknown options key %q", lineNo, key)
 			}

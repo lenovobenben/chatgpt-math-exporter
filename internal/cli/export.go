@@ -27,7 +27,6 @@ func runExport(args []string) error {
 		writeWarning bool
 		preserveLink bool
 		overwrite    bool
-		fixUserLatex bool
 	)
 
 	fs.StringVar(&bundlePath, "bundle", "", "Path to a ChatGPT official export directory")
@@ -42,7 +41,6 @@ func runExport(args []string) error {
 	fs.BoolVar(&writeWarning, "write-warnings", true, "Write warnings.json")
 	fs.BoolVar(&preserveLink, "preserve-links", true, "Preserve external links in Markdown")
 	fs.BoolVar(&overwrite, "overwrite", false, "Overwrite existing successful exports instead of skipping them")
-	fs.BoolVar(&fixUserLatex, "fix-user-latex", false, "Conservatively wrap obvious naked LaTeX in user messages for display")
 
 	if err := fs.Parse(args); err != nil {
 		if err == flag.ErrHelp {
@@ -67,7 +65,7 @@ func runExport(args []string) error {
 	}
 
 	visited := visitedFlags(fs)
-	overrideWithFlags(&cfg, visited, bundlePath, cookieFile, project, projectURL, urlList, outputDir, assetsDir, writeReadme, writeWarning, preserveLink, overwrite, fixUserLatex)
+	overrideWithFlags(&cfg, visited, bundlePath, cookieFile, project, projectURL, urlList, outputDir, assetsDir, writeReadme, writeWarning, preserveLink, overwrite)
 
 	if err := cfg.Validate(); err != nil {
 		return err
@@ -93,7 +91,6 @@ Options:
   --write-warnings       Write warnings.json into the output directory (default true)
   --preserve-links       Preserve external links in rendered Markdown (default true)
   --overwrite            Overwrite existing successful exports instead of skipping them
-  --fix-user-latex       Conservatively wrap obvious naked LaTeX in user messages for display
   --help                 Show this help text
 
 Examples:
@@ -120,7 +117,6 @@ func overrideWithFlags(
 	writeWarning bool,
 	preserveLink bool,
 	overwrite bool,
-	fixUserLatex bool,
 ) {
 	if bundlePath != "" {
 		cfg.Source.Type = "bundle"
@@ -158,9 +154,6 @@ func overrideWithFlags(
 	}
 	if visited["overwrite"] {
 		cfg.Options.OverwriteExisting = overwrite
-	}
-	if visited["fix-user-latex"] {
-		cfg.Options.FixUserLatex = fixUserLatex
 	}
 }
 

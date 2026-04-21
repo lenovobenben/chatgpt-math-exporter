@@ -123,6 +123,88 @@ func TestRunBundleExport(t *testing.T) {
 	}
 }
 
+func TestMaterializeMarkdownAssetsDownloadsAndRewritesImageMarkers(t *testing.T) {
+	oldClientFactory := newAssetHTTPClient
+	newAssetHTTPClient = func() *http.Client {
+		return &http.Client{
+			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				if req.URL.String() != "https://example.com/image.png" {
+					return &http.Response{
+						StatusCode: http.StatusNotFound,
+						Header:     make(http.Header),
+						Body:       http.NoBody,
+						Request:    req,
+					}, nil
+				}
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header: http.Header{
+						"Content-Type": []string{"image/png"},
+					},
+					Body:    ioNopCloser(strings.NewReader(string([]byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'}))),
+					Request: req,
+				}, nil
+			}),
+		}
+	}
+	defer func() { newAssetHTTPClient = oldClientFactory }()
+
+	outputDir := t.TempDir()
+	outputPath := filepath.Join(outputDir, "note.md")
+	assetsDir := filepath.Join(outputDir, "assets")
+	marker := `[[CGME_IMAGE:{"src":"https://example.com/image.png","alt":"figure one"}]]`
+
+	got, warnings, err := materializeMarkdownAssets("before\n\n"+marker+"\n\nafter", outputPath, assetsDir, "")
+	if err != nil {
+		t.Fatalf("materializeMarkdownAssets() error = %v", err)
+	}
+
+	if !strings.Contains(got, "![figure one](assets/note/image-001.png)") {
+		t.Fatalf("expected markdown image link, got: %s", got)
+	}
+	if !strings.Contains(fmt.Sprintf("%v", warnings), "asset.image_saved") {
+		t.Fatalf("expected asset saved warning, got: %#v", warnings)
+	}
+	if _, err := os.Stat(filepath.Join(assetsDir, "note", "image-001.png")); err != nil {
+		t.Fatalf("expected downloaded asset on disk: %v", err)
+	}
+}
+
+func TestMaterializeMarkdownAssetsFallsBackToRemoteLinkWhenDownloadFails(t *testing.T) {
+	oldClientFactory := newAssetHTTPClient
+	newAssetHTTPClient = func() *http.Client {
+		return &http.Client{
+			Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				return nil, errors.New("boom")
+			}),
+		}
+	}
+	defer func() { newAssetHTTPClient = oldClientFactory }()
+
+	outputDir := t.TempDir()
+	outputPath := filepath.Join(outputDir, "note.md")
+	assetsDir := filepath.Join(outputDir, "assets")
+	marker := `[[CGME_IMAGE:{"src":"https://example.invalid/missing.png","alt":"broken"}]]`
+
+	got, warnings, err := materializeMarkdownAssets(marker, outputPath, assetsDir, "")
+	if err != nil {
+		t.Fatalf("materializeMarkdownAssets() error = %v", err)
+	}
+
+	if got != "![broken](https://example.invalid/missing.png)" {
+		t.Fatalf("expected remote fallback link, got: %s", got)
+	}
+	if !strings.Contains(fmt.Sprintf("%v", warnings), "asset.image_download_failed") {
+		t.Fatalf("expected download failed warning, got: %#v", warnings)
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (fn roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return fn(req)
+}
+
 func TestNormalizeMathTextPreservesCodeFencesAndInlineCode(t *testing.T) {
 	input := strings.Join([]string{
 		"Outside code: a ≤ b and x → y.",
@@ -189,51 +271,6 @@ func TestNormalizeMathTextDoesNotWrapProseLineContainingInlineMath(t *testing.T)
 	}
 	if !strings.Contains(got, "cos\\theta=OC=\\frac{1+\\sqrt7}{4}") {
 		t.Fatalf("formula line should remain present: %s", got)
-	}
-}
-
-func TestNormalizeMathTextFixesObviousUserLatexSpans(t *testing.T) {
-	input := "请化简 \\frac{a+b}{c} 并比较 \\sqrt{5} 与 \\sqrt{2}."
-
-	got, warnings := normalizeMathText(input, normalizeMathOptions{
-		Role:         "user",
-		FixUserLatex: true,
-	})
-
-	if !strings.Contains(got, "请化简 $\\frac{a+b}{c}$ 并比较 $\\sqrt{5}$ 与 $\\sqrt{2}$.") {
-		t.Fatalf("expected obvious user latex spans to be wrapped, got: %s", got)
-	}
-	if !strings.Contains(fmt.Sprintf("%v", warnings), "math.user_latex_wrapped") {
-		t.Fatalf("expected user latex warning, got: %#v", warnings)
-	}
-}
-
-func TestNormalizeMathTextDoesNotTouchAssistantLatexSpans(t *testing.T) {
-	input := "请化简 \\frac{a+b}{c}."
-
-	got, _ := normalizeMathText(input, normalizeMathOptions{
-		Role:         "assistant",
-		FixUserLatex: true,
-	})
-
-	if got != input {
-		t.Fatalf("assistant content should remain unchanged, got: %s", got)
-	}
-}
-
-func TestNormalizeMathTextDoesNotDoubleWrapExistingUserMath(t *testing.T) {
-	input := "这里已经有 $\\frac{a+b}{c}$ 了。"
-
-	got, _ := normalizeMathText(input, normalizeMathOptions{
-		Role:         "user",
-		FixUserLatex: true,
-	})
-
-	if strings.Contains(got, "```math\n由作法第 8–9 步") {
-		t.Fatalf("existing user math should not be turned into block math: %s", got)
-	}
-	if got != input {
-		t.Fatalf("existing user math should remain unchanged, got: %s", got)
 	}
 }
 
