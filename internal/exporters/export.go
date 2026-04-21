@@ -563,7 +563,8 @@ func materializeMarkdownAssets(markdown, outputPath, assetsDir, cookieHeader str
 		return markdown, nil, nil
 	}
 
-	assetDir := filepath.Join(assetsDir, slugify(strings.TrimSuffix(filepath.Base(outputPath), filepath.Ext(outputPath))))
+	_ = assetsDir
+	assetDir := filepath.Join(filepath.Dir(outputPath), "assets")
 	if err := os.MkdirAll(assetDir, 0o755); err != nil {
 		return "", nil, fmt.Errorf("create asset directory %q: %w", assetDir, err)
 	}

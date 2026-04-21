@@ -159,13 +159,13 @@ func TestMaterializeMarkdownAssetsDownloadsAndRewritesImageMarkers(t *testing.T)
 		t.Fatalf("materializeMarkdownAssets() error = %v", err)
 	}
 
-	if !strings.Contains(got, "![figure one](assets/note/image-001.png)") {
+	if !strings.Contains(got, "![figure one](assets/image-001.png)") {
 		t.Fatalf("expected markdown image link, got: %s", got)
 	}
 	if !strings.Contains(fmt.Sprintf("%v", warnings), "asset.image_saved") {
 		t.Fatalf("expected asset saved warning, got: %#v", warnings)
 	}
-	if _, err := os.Stat(filepath.Join(assetsDir, "note", "image-001.png")); err != nil {
+	if _, err := os.Stat(filepath.Join(outputDir, "assets", "image-001.png")); err != nil {
 		t.Fatalf("expected downloaded asset on disk: %v", err)
 	}
 }
