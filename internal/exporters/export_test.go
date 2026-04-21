@@ -3,6 +3,7 @@ package exporters
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -230,8 +231,73 @@ func TestProjectFetcherRequiresSessionCookie(t *testing.T) {
 	}
 }
 
+func TestProjectFetcherReadsCookieFromFile(t *testing.T) {
+	cookieFile := filepath.Join(t.TempDir(), "cookie.txt")
+	if err := os.WriteFile(cookieFile, []byte("session=from-file"), 0o600); err != nil {
+		t.Fatalf("write cookie file: %v", err)
+	}
+	t.Setenv(sessionCookieEnv, "session=from-env")
+
+	fetcher := NewProjectFetcher(config.Config{
+		Source: config.SourceConfig{
+			Type:       "project_url",
+			ProjectURL: "https://chatgpt.com/c/conv-1",
+			CookieFile: cookieFile,
+		},
+	})
+
+	composite, ok := fetcher.(CompositeProjectFetcher)
+	if !ok {
+		t.Fatalf("expected composite fetcher, got %T", fetcher)
+	}
+
+	var httpFetcher *ChatGPTProjectFetcher
+	for _, candidate := range composite.fetchers {
+		if typed, ok := candidate.(*ChatGPTProjectFetcher); ok {
+			httpFetcher = typed
+			break
+		}
+	}
+	if httpFetcher == nil {
+		t.Fatalf("expected HTTP fallback fetcher to be configured")
+	}
+	if httpFetcher.sessionCookie != "session=from-file" {
+		t.Fatalf("expected cookie from file, got %q", httpFetcher.sessionCookie)
+	}
+}
+
+func TestProjectFetcherRejectsEmptyCookieFile(t *testing.T) {
+	cookieFile := filepath.Join(t.TempDir(), "cookie.txt")
+	if err := os.WriteFile(cookieFile, []byte(" \n"), 0o600); err != nil {
+		t.Fatalf("write cookie file: %v", err)
+	}
+
+	fetcher := NewProjectFetcher(config.Config{
+		Source: config.SourceConfig{
+			Type:       "project_url",
+			ProjectURL: "https://chatgpt.com/c/conv-1",
+			CookieFile: cookieFile,
+		},
+	})
+
+	_, err := fetcher.FetchConversation(t.Context(), ProjectURLInfo{
+		Host:           "chatgpt.com",
+		ConversationID: "conv-1",
+	})
+	if err == nil || !strings.Contains(err.Error(), "cookie_file_empty") {
+		t.Fatalf("expected empty cookie file error, got %v", err)
+	}
+}
+
 func TestRunProjectURLExportWritesFetchedMarkdown(t *testing.T) {
 	outputDir := t.TempDir()
+	projectDir := filepath.Join(outputDir, "fetched-algebra")
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatalf("mkdir project dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, "001_placeholder.md"), []byte("stale"), 0o644); err != nil {
+		t.Fatalf("write stale placeholder: %v", err)
+	}
 
 	originalFactory := projectFetcherFactory
 	projectFetcherFactory = func(cfg config.Config) ProjectFetcher {
@@ -272,7 +338,6 @@ func TestRunProjectURLExportWritesFetchedMarkdown(t *testing.T) {
 		t.Fatalf("Run() error = %v", err)
 	}
 
-	projectDir := filepath.Join(outputDir, "fetched-algebra")
 	content, err := os.ReadFile(filepath.Join(projectDir, "001_fetched-algebra.md"))
 	if err != nil {
 		t.Fatalf("read fetched markdown: %v", err)
@@ -298,6 +363,9 @@ func TestRunProjectURLExportWritesFetchedMarkdown(t *testing.T) {
 	if !strings.Contains(string(warningsContent), "source.project_url.browser_message_deduped") {
 		t.Fatalf("warnings should include fetched browser warnings: %s", string(warningsContent))
 	}
+	if !strings.Contains(string(warningsContent), "source.project_url.stale_placeholder_removed") {
+		t.Fatalf("warnings should include stale placeholder cleanup: %s", string(warningsContent))
+	}
 
 	readmeContent, err := os.ReadFile(filepath.Join(outputDir, "README.md"))
 	if err != nil {
@@ -306,6 +374,65 @@ func TestRunProjectURLExportWritesFetchedMarkdown(t *testing.T) {
 	if !strings.Contains(string(readmeContent), "Live project URL conversation content was fetched and rendered into Markdown files.") ||
 		!strings.Contains(string(readmeContent), "Project: Fetched Algebra") {
 		t.Fatalf("unexpected README content: %s", string(readmeContent))
+	}
+}
+
+func TestRunProjectURLExportRemovesLegacySlugPlaceholder(t *testing.T) {
+	outputDir := t.TempDir()
+	legacyDir := filepath.Join(outputDir, "jing-dian-shu-xue-ti-100li-6")
+	if err := os.MkdirAll(legacyDir, 0o755); err != nil {
+		t.Fatalf("mkdir legacy dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(legacyDir, "001_placeholder.md"), []byte("legacy"), 0o644); err != nil {
+		t.Fatalf("write legacy placeholder: %v", err)
+	}
+
+	originalFactory := projectFetcherFactory
+	projectFetcherFactory = func(cfg config.Config) ProjectFetcher {
+		return stubProjectFetcher{
+			fetched: FetchedConversation{
+				ProjectName: "经典数学题100例 6 - 三角形三边推导",
+				Messages: []Message{
+					{Role: "user", Content: "Question"},
+					{Role: "assistant", Content: "Answer"},
+				},
+			},
+		}
+	}
+	defer func() {
+		projectFetcherFactory = originalFactory
+	}()
+
+	cfg := config.Config{
+		Source: config.SourceConfig{
+			Type:       "project_url",
+			ProjectURL: "https://chatgpt.com/g/g-p-69b35dca021081918246c3df20a7bf27-jing-dian-shu-xue-ti-100li-6/c/69b8017a-69a0-8328-b934-c6fced4a3c0d",
+		},
+		Output: config.OutputConfig{
+			Dir:       outputDir,
+			AssetsDir: filepath.Join(outputDir, "assets"),
+		},
+		Options: config.OptionConfig{
+			WriteReadme:   true,
+			WriteWarnings: true,
+			PreserveLinks: true,
+		},
+	}
+
+	if err := Run(cfg); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(legacyDir, "001_placeholder.md")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("legacy placeholder should be removed, err=%v", err)
+	}
+
+	warningsContent, err := os.ReadFile(filepath.Join(outputDir, "warnings.json"))
+	if err != nil {
+		t.Fatalf("read warnings: %v", err)
+	}
+	if !strings.Contains(string(warningsContent), "source.project_url.legacy_placeholder_removed") {
+		t.Fatalf("warnings should include legacy placeholder cleanup: %s", string(warningsContent))
 	}
 }
 
@@ -363,6 +490,90 @@ func TestRunProjectURLExportWritesPlaceholderForFetchFailure(t *testing.T) {
 	}
 	if !strings.Contains(string(readmeContent), "live project URL fetch did not yield exportable conversation content") {
 		t.Fatalf("README missing placeholder note: %s", string(readmeContent))
+	}
+}
+
+func TestRunProjectURLListExportWritesMultipleConversations(t *testing.T) {
+	outputDir := t.TempDir()
+	urlListPath := filepath.Join(t.TempDir(), "math-sessions.txt")
+	urls := strings.Join([]string{
+		"https://chatgpt.com/c/conv-1",
+		"",
+		"# comment",
+		"https://chatgpt.com/c/conv-2",
+	}, "\n")
+	if err := os.WriteFile(urlListPath, []byte(urls), 0o644); err != nil {
+		t.Fatalf("write url list: %v", err)
+	}
+
+	originalFactory := projectFetcherFactory
+	projectFetcherFactory = func(cfg config.Config) ProjectFetcher {
+		return routedStubProjectFetcher{
+			routes: map[string]FetchedConversation{
+				"conv-1": {
+					ProjectName: "Problem One",
+					Messages: []Message{
+						{Role: "user", Content: "Question 1"},
+						{Role: "assistant", Content: "Answer 1"},
+					},
+				},
+				"conv-2": {
+					ProjectName: "Problem Two",
+					Messages: []Message{
+						{Role: "user", Content: "Question 2"},
+						{Role: "assistant", Content: "Answer 2"},
+					},
+				},
+			},
+		}
+	}
+	defer func() {
+		projectFetcherFactory = originalFactory
+	}()
+
+	cfg := config.Config{
+		Source: config.SourceConfig{
+			Type:    "project_url_list",
+			URLList: urlListPath,
+		},
+		Output: config.OutputConfig{
+			Dir:       outputDir,
+			AssetsDir: filepath.Join(outputDir, "assets"),
+		},
+		Options: config.OptionConfig{
+			WriteReadme:   true,
+			WriteWarnings: true,
+			PreserveLinks: true,
+		},
+	}
+
+	if err := Run(cfg); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	for _, path := range []string{
+		filepath.Join(outputDir, "problem-one", "001_problem-one.md"),
+		filepath.Join(outputDir, "problem-two", "001_problem-two.md"),
+	} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("expected exported markdown %q: %v", path, err)
+		}
+	}
+
+	readmeContent, err := os.ReadFile(filepath.Join(outputDir, "README.md"))
+	if err != nil {
+		t.Fatalf("read README: %v", err)
+	}
+	if !strings.Contains(string(readmeContent), "Live project URL list entries were fetched and rendered into Markdown files.") {
+		t.Fatalf("unexpected batch README: %s", string(readmeContent))
+	}
+
+	warningsContent, err := os.ReadFile(filepath.Join(outputDir, "warnings.json"))
+	if err != nil {
+		t.Fatalf("read warnings: %v", err)
+	}
+	if !strings.Contains(string(warningsContent), "source.project_url_list.completed") {
+		t.Fatalf("expected batch completion warning: %s", string(warningsContent))
 	}
 }
 
@@ -473,17 +684,23 @@ func TestParseBrowserConversationPayload(t *testing.T) {
 	}
 }
 
-func TestCreateTempBrowserProfileRoot(t *testing.T) {
-	root, err := createTempBrowserProfileRoot()
+func TestEnsureBrowserProfileRoot(t *testing.T) {
+	root, err := ensureBrowserProfileRoot(filepath.Join(t.TempDir(), "browser-profile"))
 	if err != nil {
-		t.Fatalf("createTempBrowserProfileRoot() error = %v", err)
+		t.Fatalf("ensureBrowserProfileRoot() error = %v", err)
 	}
-	defer os.RemoveAll(root)
 	if _, err := os.Stat(filepath.Join(root, "Default")); err != nil {
 		t.Fatalf("expected Default profile dir: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(root, "Local State")); err != nil {
 		t.Fatalf("expected Local State file: %v", err)
+	}
+}
+
+func TestBrowserProfileRootFromEnv(t *testing.T) {
+	t.Setenv(browserProfileRootEnv, "/tmp/cgme-browser-profile-test")
+	if got := browserProfileRoot(); got != "/tmp/cgme-browser-profile-test" {
+		t.Fatalf("unexpected browser profile root: %s", got)
 	}
 }
 
@@ -535,6 +752,171 @@ func TestBrowserDOMEmptyMessage(t *testing.T) {
 	}
 }
 
+func TestNewBrowserProjectFetcherAllowsExistingSessionWithoutCookie(t *testing.T) {
+	origStat := osStat
+	origLookPath := execLookPath
+	origCDPReady := cdpReady
+	defer func() {
+		osStat = origStat
+		execLookPath = origLookPath
+		cdpReady = origCDPReady
+	}()
+
+	osStat = func(name string) (os.FileInfo, error) { return fakeFileInfo{name: filepath.Base(name)}, nil }
+	execLookPath = func(file string) (string, error) { return "/usr/bin/" + file, nil }
+	cdpReady = func(ctx context.Context, port int) bool { return true }
+
+	fetcher, ok := newBrowserProjectFetcher("")
+	if !ok || fetcher == nil {
+		t.Fatalf("expected browser fetcher to be available when an existing CDP session is ready")
+	}
+}
+
+func TestBrowserFetcherDoesNotRelaunchAfterStartupFailure(t *testing.T) {
+	origEnsureProfile := ensureBrowserProfile
+	origEnsureSession := ensureChromeSession
+	origRunCDP := runCDPExtraction
+	origCDPReady := cdpReady
+	defer func() {
+		ensureBrowserProfile = origEnsureProfile
+		ensureChromeSession = origEnsureSession
+		runCDPExtraction = origRunCDP
+		cdpReady = origCDPReady
+	}()
+
+	ensureBrowserProfile = func(root string) (string, error) { return root, nil }
+	launchCalls := 0
+	ensureChromeSession = func(ctx context.Context, chromePath, profileRoot string, port int) (int, bool, error) {
+		launchCalls++
+		return 0, false, fmt.Errorf("boom")
+	}
+	runCDPExtraction = func(ctx context.Context, port int, pageURL, cookieHeader string, waitAfter time.Duration) (browserConversationPayload, error) {
+		t.Fatalf("runCDPExtraction should not be called when startup fails")
+		return browserConversationPayload{}, nil
+	}
+	cdpReady = func(ctx context.Context, port int) bool { return false }
+
+	fetcher := &CDPBrowserProjectFetcher{
+		chromePath:   chromeAppPath,
+		waitAfter:    time.Second,
+		cookieHeader: "session=test",
+		profileRoot:  "/tmp/cgme-browser-profile",
+		debugPort:    9223,
+	}
+
+	for i := 0; i < 2; i++ {
+		_, err := fetcher.FetchConversation(t.Context(), ProjectURLInfo{
+			Host:           "chatgpt.com",
+			ConversationID: "conv-1",
+		})
+		if err == nil || !strings.Contains(err.Error(), "browser_launch_failed") {
+			t.Fatalf("expected startup failure on attempt %d, got %v", i+1, err)
+		}
+	}
+
+	if launchCalls != 1 {
+		t.Fatalf("expected one browser launch attempt, got %d", launchCalls)
+	}
+}
+
+func TestReadProjectURLList(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "urls.txt")
+	content := strings.Join([]string{
+		"  ",
+		"# comment",
+		"https://chatgpt.com/c/conv-1",
+		" https://chatgpt.com/c/conv-2 ",
+	}, "\n")
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write url list: %v", err)
+	}
+
+	got, err := readProjectURLList(path)
+	if err != nil {
+		t.Fatalf("readProjectURLList() error = %v", err)
+	}
+	if len(got) != 2 || got[0] != "https://chatgpt.com/c/conv-1" || got[1] != "https://chatgpt.com/c/conv-2" {
+		t.Fatalf("unexpected URL list: %#v", got)
+	}
+}
+
+func TestValidateDiscoveryURL(t *testing.T) {
+	if err := validateDiscoveryURL("https://chatgpt.com/g/g-p-demo"); err != nil {
+		t.Fatalf("expected valid discovery URL, got %v", err)
+	}
+	if err := validateDiscoveryURL("http://chatgpt.com/g/g-p-demo"); err == nil {
+		t.Fatalf("expected https validation failure")
+	}
+}
+
+func TestDiscoverProjectPageURLsWritesOutputList(t *testing.T) {
+	outputList := filepath.Join(t.TempDir(), "math-sessions.txt")
+
+	origFactory := browserProjectFetcherFactory
+	defer func() {
+		browserProjectFetcherFactory = origFactory
+	}()
+
+	browserProjectFetcherFactory = func(cookieHeader string) (ProjectFetcher, bool) {
+		return discoveryStubFetcher{
+			links: []discoveredConversationLink{
+				{Title: "题目 1", URL: "https://chatgpt.com/c/conv-1"},
+				{Title: "题目 2", URL: "https://chatgpt.com/g/g-p-demo/c/conv-2"},
+				{Title: "题目 3", URL: "https://chatgpt.com/g/g-p-demo/c/conv-3"},
+			},
+		}, true
+	}
+
+	if err := DiscoverProjectPageURLs("https://chatgpt.com/g/g-p-demo", "", outputList); err != nil {
+		t.Fatalf("DiscoverProjectPageURLs() error = %v", err)
+	}
+
+	content, err := os.ReadFile(outputList)
+	if err != nil {
+		t.Fatalf("read output list: %v", err)
+	}
+	got := string(content)
+	if strings.Contains(got, "https://chatgpt.com/c/conv-1\n") {
+		t.Fatalf("expected non-project conversation URL to be filtered out: %s", got)
+	}
+	if !strings.Contains(got, "https://chatgpt.com/g/g-p-demo/c/conv-2\n") || !strings.Contains(got, "https://chatgpt.com/g/g-p-demo/c/conv-3\n") {
+		t.Fatalf("unexpected output list content: %s", got)
+	}
+}
+
+func TestFilterDiscoveredLinks(t *testing.T) {
+	links := []discoveredConversationLink{
+		{URL: "https://chatgpt.com/c/conv-1"},
+		{URL: "https://chatgpt.com/g/g-p-demo/c/conv-2"},
+		{URL: "https://chatgpt.com/g/g-p-other/c/conv-3"},
+	}
+	got := filterDiscoveredLinks("https://chatgpt.com/g/g-p-demo", links)
+	if len(got) != 1 || got[0].URL != "https://chatgpt.com/g/g-p-demo/c/conv-2" {
+		t.Fatalf("unexpected filtered links: %#v", got)
+	}
+}
+
+func TestBuildProjectConversationPrefix(t *testing.T) {
+	got := buildProjectConversationPrefix("https://chatgpt.com/g/g-p-demo-project/project")
+	if got != "https://chatgpt.com/g/g-p-demo-project/c/" {
+		t.Fatalf("unexpected conversation prefix: %q", got)
+	}
+	if got := buildProjectConversationPrefix("https://chatgpt.com/c/conv-1"); got != "" {
+		t.Fatalf("expected empty prefix for non-project URL, got %q", got)
+	}
+}
+
+type fakeFileInfo struct {
+	name string
+}
+
+func (f fakeFileInfo) Name() string       { return f.name }
+func (f fakeFileInfo) Size() int64        { return 0 }
+func (f fakeFileInfo) Mode() os.FileMode  { return 0 }
+func (f fakeFileInfo) ModTime() time.Time { return time.Time{} }
+func (f fakeFileInfo) IsDir() bool        { return false }
+func (f fakeFileInfo) Sys() any           { return nil }
+
 type testReadCloser struct {
 	*strings.Reader
 }
@@ -552,4 +934,35 @@ type stubProjectFetcher struct {
 
 func (s stubProjectFetcher) FetchConversation(ctx context.Context, info ProjectURLInfo) (FetchedConversation, error) {
 	return s.fetched, s.err
+}
+
+type routedStubProjectFetcher struct {
+	routes map[string]FetchedConversation
+	err    error
+}
+
+func (s routedStubProjectFetcher) FetchConversation(ctx context.Context, info ProjectURLInfo) (FetchedConversation, error) {
+	if s.err != nil {
+		return FetchedConversation{}, s.err
+	}
+	if fetched, ok := s.routes[info.ConversationID]; ok {
+		return fetched, nil
+	}
+	return FetchedConversation{}, &ProjectFetchError{
+		Code:    "source.project_url.missing_test_route",
+		Message: fmt.Sprintf("no stub fetch route for conversation %q", info.ConversationID),
+	}
+}
+
+type discoveryStubFetcher struct {
+	links []discoveredConversationLink
+	err   error
+}
+
+func (s discoveryStubFetcher) FetchConversation(ctx context.Context, info ProjectURLInfo) (FetchedConversation, error) {
+	return FetchedConversation{}, s.err
+}
+
+func (s discoveryStubFetcher) DiscoverProjectPageURLs(ctx context.Context, pageURL string) ([]discoveredConversationLink, error) {
+	return s.links, s.err
 }

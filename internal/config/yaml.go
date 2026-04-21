@@ -47,6 +47,10 @@ func parseSimpleYAML(data []byte, cfg *Config) error {
 				cfg.Source.Project = value
 			case "project_url":
 				cfg.Source.ProjectURL = value
+			case "url_list":
+				cfg.Source.URLList = value
+			case "cookie_file":
+				cfg.Source.CookieFile = value
 			default:
 				return fmt.Errorf("line %d: unknown source key %q", lineNo, key)
 			}

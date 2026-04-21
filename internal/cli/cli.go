@@ -18,6 +18,8 @@ func Run(args []string) error {
 		return nil
 	case "export":
 		return runExport(args[1:])
+	case "discover":
+		return runDiscover(args[1:])
 	default:
 		return fmt.Errorf("unknown command %q\n\nRun `cgme --help` to see available commands", args[0])
 	}
@@ -30,14 +32,16 @@ Usage:
   cgme <command> [options]
 
 Commands:
-  export    Export from a ChatGPT bundle or project URL
-  help      Show help text
+  export     Export from a ChatGPT bundle or project URL
+  discover   Discover project conversation URLs from a ChatGPT project page
+  help       Show help text
 
 Examples:
   cgme export --bundle ./chatgpt-export --output ./my-notes
+  cgme discover --project-page-url "https://chatgpt.com/g/..." --output-list ./math-sessions.txt
   cgme export --config ./cgme.yaml
 
-Run "cgme export --help" for export-specific options.
+Run "cgme export --help" or "cgme discover --help" for command-specific options.
 `)
 }
 

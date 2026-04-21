@@ -1,6 +1,7 @@
 package exporters
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -31,6 +32,8 @@ func Run(cfg config.Config) error {
 		return runBundleExport(cfg)
 	case "project_url":
 		return runProjectURLExport(cfg)
+	case "project_url_list":
+		return runProjectURLListExport(cfg)
 	default:
 		return fmt.Errorf("unsupported source type %q", cfg.Source.Type)
 	}
@@ -81,12 +84,90 @@ func runBundleExport(cfg config.Config) error {
 }
 
 func runProjectURLExport(cfg config.Config) error {
-	urlInfo, err := parseProjectURL(cfg.Source.ProjectURL)
+	fetcher := projectFetcherFactory(cfg)
+	result, err := exportProjectURL(cfg, fetcher, cfg.Source.ProjectURL)
 	if err != nil {
 		return err
 	}
 
+	if cfg.Options.WriteReadme {
+		if err := writeOutputReadme(filepath.Join(cfg.Output.Dir, "README.md"), cfg, result.projectName, result.conversationCount, result.placeholder); err != nil {
+			return err
+		}
+	}
+
+	if cfg.Options.WriteWarnings {
+		if err := writeWarnings(filepath.Join(cfg.Output.Dir, "warnings.json"), result.warnings); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func runProjectURLListExport(cfg config.Config) error {
+	urls, err := readProjectURLList(cfg.Source.URLList)
+	if err != nil {
+		return err
+	}
+	if len(urls) == 0 {
+		return fmt.Errorf("no project URLs found in %q", cfg.Source.URLList)
+	}
+
 	fetcher := projectFetcherFactory(cfg)
+	allWarnings := make([]warningRecord, 0, len(urls))
+	exportedCount := 0
+	placeholderCount := 0
+
+	for i, rawURL := range urls {
+		result, err := exportProjectURL(cfg, fetcher, rawURL)
+		if err != nil {
+			allWarnings = append(allWarnings, warningRecord{
+				Code:    "source.project_url_list.invalid_url",
+				Message: fmt.Sprintf("Line %d URL %q could not be exported: %v", i+1, rawURL, err),
+			})
+			continue
+		}
+		allWarnings = append(allWarnings, result.warnings...)
+		if result.placeholder {
+			placeholderCount++
+		} else {
+			exportedCount += result.conversationCount
+		}
+	}
+
+	if cfg.Options.WriteReadme {
+		if err := writeOutputReadme(filepath.Join(cfg.Output.Dir, "README.md"), cfg, fmt.Sprintf("%d project URL(s)", len(urls)), exportedCount, placeholderCount > 0); err != nil {
+			return err
+		}
+	}
+
+	if cfg.Options.WriteWarnings {
+		allWarnings = append(allWarnings, warningRecord{
+			Code:    "source.project_url_list.completed",
+			Message: fmt.Sprintf("Processed %d project URL(s): %d exported, %d placeholder result(s).", len(urls), exportedCount, placeholderCount),
+		})
+		if err := writeWarnings(filepath.Join(cfg.Output.Dir, "warnings.json"), allWarnings); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+type projectURLExportResult struct {
+	projectName       string
+	conversationCount int
+	placeholder       bool
+	warnings          []warningRecord
+}
+
+func exportProjectURL(cfg config.Config, fetcher ProjectFetcher, rawURL string) (projectURLExportResult, error) {
+	urlInfo, err := parseProjectURL(rawURL)
+	if err != nil {
+		return projectURLExportResult{}, err
+	}
+
 	fetched, fetchErr := fetcher.FetchConversation(context.Background(), urlInfo)
 
 	projectName := chooseProjectName(cfg, nil)
@@ -98,7 +179,7 @@ func runProjectURLExport(cfg config.Config) error {
 	}
 	projectDir := filepath.Join(cfg.Output.Dir, slugify(projectName))
 	if err := os.MkdirAll(projectDir, 0o755); err != nil {
-		return fmt.Errorf("create project directory %q: %w", projectDir, err)
+		return projectURLExportResult{}, fmt.Errorf("create project directory %q: %w", projectDir, err)
 	}
 
 	warnings := []warningRecord{
@@ -123,11 +204,33 @@ func runProjectURLExport(cfg config.Config) error {
 
 		filename := fmt.Sprintf("%03d_%s.md", 1, slugify(conversationFileBase(conv.Title, 1)))
 		if err := os.WriteFile(filepath.Join(projectDir, filename), []byte(rendered), 0o644); err != nil {
-			return fmt.Errorf("write conversation markdown %q: %w", filename, err)
+			return projectURLExportResult{}, fmt.Errorf("write conversation markdown %q: %w", filename, err)
+		}
+		placeholderPath := filepath.Join(projectDir, "001_placeholder.md")
+		if err := os.Remove(placeholderPath); err == nil {
+			warnings = append(warnings, warningRecord{
+				Code:    "source.project_url.stale_placeholder_removed",
+				Message: fmt.Sprintf("Removed stale placeholder file %q after successful export.", placeholderPath),
+			})
+		} else if err != nil && !os.IsNotExist(err) {
+			return projectURLExportResult{}, fmt.Errorf("remove stale placeholder %q: %w", placeholderPath, err)
+		}
+		legacyProjectDir := legacyProjectURLDir(cfg, urlInfo, projectDir)
+		if legacyProjectDir != "" {
+			legacyPlaceholderPath := filepath.Join(legacyProjectDir, "001_placeholder.md")
+			if err := os.Remove(legacyPlaceholderPath); err == nil {
+				warnings = append(warnings, warningRecord{
+					Code:    "source.project_url.legacy_placeholder_removed",
+					Message: fmt.Sprintf("Removed legacy placeholder file %q after successful export.", legacyPlaceholderPath),
+				})
+				_ = os.Remove(legacyProjectDir)
+			} else if err != nil && !os.IsNotExist(err) {
+				return projectURLExportResult{}, fmt.Errorf("remove legacy placeholder %q: %w", legacyPlaceholderPath, err)
+			}
 		}
 	} else {
-		if err := writePlaceholderConversation(filepath.Join(projectDir, "001_placeholder.md"), cfg, projectName, urlInfo, fetchErr); err != nil {
-			return err
+		if err := writePlaceholderConversation(filepath.Join(projectDir, "001_placeholder.md"), cfg, projectName, urlInfo, fetchErr, rawURL); err != nil {
+			return projectURLExportResult{}, err
 		}
 	}
 
@@ -148,19 +251,12 @@ func runProjectURLExport(cfg config.Config) error {
 		})
 	}
 
-	if cfg.Options.WriteReadme {
-		if err := writeOutputReadme(filepath.Join(cfg.Output.Dir, "README.md"), cfg, projectName, conversationCount, placeholder); err != nil {
-			return err
-		}
-	}
-
-	if cfg.Options.WriteWarnings {
-		if err := writeWarnings(filepath.Join(cfg.Output.Dir, "warnings.json"), warnings); err != nil {
-			return err
-		}
-	}
-
-	return nil
+	return projectURLExportResult{
+		projectName:       projectName,
+		conversationCount: conversationCount,
+		placeholder:       placeholder,
+		warnings:          warnings,
+	}, nil
 }
 
 func conversationFromFetched(urlInfo ProjectURLInfo, fetched FetchedConversation) Conversation {
@@ -196,7 +292,7 @@ func conversationFileBase(title string, index int) string {
 	return title
 }
 
-func writePlaceholderConversation(path string, cfg config.Config, projectName string, urlInfo ProjectURLInfo, fetchErr error) error {
+func writePlaceholderConversation(path string, cfg config.Config, projectName string, urlInfo ProjectURLInfo, fetchErr error, rawURL string) error {
 	var details strings.Builder
 	statusHeading := "Live project URL fetch did not return exportable messages for this run, so a placeholder file was written instead."
 	if urlInfo.Host != "" {
@@ -236,7 +332,7 @@ func writePlaceholderConversation(path string, cfg config.Config, projectName st
 		projectName,
 		cfg.Source.Type,
 		emptyFallback(cfg.Source.Path),
-		emptyFallback(cfg.Source.ProjectURL),
+		emptyFallback(rawURL),
 		details.String(),
 		statusHeading,
 	)
@@ -251,6 +347,9 @@ func writeOutputReadme(path string, cfg config.Config, projectName string, conve
 	status := "Bundle conversations were exported into Markdown files."
 	if cfg.Source.Type == "project_url" {
 		status = "Live project URL conversation content was fetched and rendered into Markdown files."
+	}
+	if cfg.Source.Type == "project_url_list" {
+		status = "Live project URL list entries were fetched and rendered into Markdown files."
 	}
 	if placeholder {
 		status = "This output contains a placeholder because the live project URL fetch did not yield exportable conversation content."
@@ -309,4 +408,37 @@ func qualifyWarnings(conv Conversation, warnings []warningRecord) []warningRecor
 		})
 	}
 	return out
+}
+
+func readProjectURLList(path string) ([]string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("open URL list %q: %w", path, err)
+	}
+	defer file.Close()
+
+	out := make([]string, 0)
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		out = append(out, line)
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("read URL list %q: %w", path, err)
+	}
+	return out, nil
+}
+
+func legacyProjectURLDir(cfg config.Config, urlInfo ProjectURLInfo, currentProjectDir string) string {
+	if strings.TrimSpace(cfg.Source.Project) != "" || strings.TrimSpace(urlInfo.GPTSlug) == "" {
+		return ""
+	}
+	legacyDir := filepath.Join(cfg.Output.Dir, slugify(urlInfo.GPTSlug))
+	if legacyDir == currentProjectDir {
+		return ""
+	}
+	return legacyDir
 }

@@ -55,11 +55,17 @@ func (e *ProjectFetchError) Warning() warningRecord {
 }
 
 func NewProjectFetcher(cfg config.Config) ProjectFetcher {
+	sessionCookie, err := resolveSessionCookie(cfg)
+	if err != nil {
+		return CompositeProjectFetcher{fetchers: []ProjectFetcher{
+			errorProjectFetcher{err: err},
+		}}
+	}
+
 	fetchers := make([]ProjectFetcher, 0, 2)
-	if browserFetcher, ok := newBrowserProjectFetcher(); ok {
+	if browserFetcher, ok := newBrowserProjectFetcher(sessionCookie); ok {
 		fetchers = append(fetchers, browserFetcher)
 	}
-	sessionCookie := strings.TrimSpace(os.Getenv(sessionCookieEnv))
 	if sessionCookie != "" || len(fetchers) == 0 {
 		fetchers = append(fetchers, &ChatGPTProjectFetcher{
 			client: &http.Client{
@@ -70,6 +76,14 @@ func NewProjectFetcher(cfg config.Config) ProjectFetcher {
 		})
 	}
 	return CompositeProjectFetcher{fetchers: fetchers}
+}
+
+type errorProjectFetcher struct {
+	err error
+}
+
+func (f errorProjectFetcher) FetchConversation(ctx context.Context, info ProjectURLInfo) (FetchedConversation, error) {
+	return FetchedConversation{}, f.err
 }
 
 func (f *ChatGPTProjectFetcher) FetchConversation(ctx context.Context, info ProjectURLInfo) (FetchedConversation, error) {
@@ -206,4 +220,25 @@ func isCloudflareChallenge(resp *http.Response, body []byte) bool {
 		}
 	}
 	return false
+}
+
+func resolveSessionCookie(cfg config.Config) (string, error) {
+	if strings.TrimSpace(cfg.Source.CookieFile) != "" {
+		data, err := os.ReadFile(cfg.Source.CookieFile)
+		if err != nil {
+			return "", &ProjectFetchError{
+				Code:    "source.project_url.cookie_file_unreadable",
+				Message: fmt.Sprintf("Failed to read cookie file %q: %v", cfg.Source.CookieFile, err),
+			}
+		}
+		cookie := strings.TrimSpace(string(data))
+		if cookie == "" {
+			return "", &ProjectFetchError{
+				Code:    "source.project_url.cookie_file_empty",
+				Message: fmt.Sprintf("Cookie file %q is empty.", cfg.Source.CookieFile),
+			}
+		}
+		return cookie, nil
+	}
+	return strings.TrimSpace(os.Getenv(sessionCookieEnv)), nil
 }

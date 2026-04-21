@@ -20,6 +20,8 @@ type SourceConfig struct {
 	Path       string `json:"path"`
 	Project    string `json:"project"`
 	ProjectURL string `json:"project_url"`
+	URLList    string `json:"url_list"`
+	CookieFile string `json:"cookie_file"`
 }
 
 type OutputConfig struct {
@@ -77,6 +79,8 @@ func (c *Config) Validate() error {
 	if c.Source.Type == "" {
 		if c.Source.Path != "" {
 			c.Source.Type = "bundle"
+		} else if c.Source.URLList != "" {
+			c.Source.Type = "project_url_list"
 		} else if c.Source.ProjectURL != "" {
 			c.Source.Type = "project_url"
 		}
@@ -94,8 +98,25 @@ func (c *Config) Validate() error {
 		if err := require("source.project_url", c.Source.ProjectURL); err != nil {
 			return err
 		}
+		if strings.TrimSpace(c.Source.CookieFile) != "" {
+			if _, err := os.Stat(c.Source.CookieFile); err != nil {
+				return fmt.Errorf("cookie file %q is not accessible: %w", c.Source.CookieFile, err)
+			}
+		}
+	case "project_url_list":
+		if err := require("source.url_list", c.Source.URLList); err != nil {
+			return err
+		}
+		if _, err := os.Stat(c.Source.URLList); err != nil {
+			return fmt.Errorf("URL list file %q is not accessible: %w", c.Source.URLList, err)
+		}
+		if strings.TrimSpace(c.Source.CookieFile) != "" {
+			if _, err := os.Stat(c.Source.CookieFile); err != nil {
+				return fmt.Errorf("cookie file %q is not accessible: %w", c.Source.CookieFile, err)
+			}
+		}
 	default:
-		return errors.New("source type must be `bundle` or `project_url`")
+		return errors.New("source type must be `bundle`, `project_url`, or `project_url_list`")
 	}
 
 	if c.Output.Dir == "" {

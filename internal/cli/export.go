@@ -16,8 +16,10 @@ func runExport(args []string) error {
 
 	var (
 		bundlePath   string
+		cookieFile   string
 		project      string
 		projectURL   string
+		urlList      string
 		outputDir    string
 		assetsDir    string
 		configPath   string
@@ -27,8 +29,10 @@ func runExport(args []string) error {
 	)
 
 	fs.StringVar(&bundlePath, "bundle", "", "Path to a ChatGPT official export directory")
+	fs.StringVar(&cookieFile, "cookie-file", "", "Path to a file that contains the ChatGPT session cookie header")
 	fs.StringVar(&project, "project", "", "Project name inside the export bundle")
 	fs.StringVar(&projectURL, "project-url", "", "ChatGPT project URL")
+	fs.StringVar(&urlList, "url-list", "", "Path to a text file that contains one ChatGPT project URL per line")
 	fs.StringVar(&outputDir, "output", "", "Output directory")
 	fs.StringVar(&assetsDir, "assets-dir", "", "Assets directory override")
 	fs.StringVar(&configPath, "config", "", "Path to a config file")
@@ -59,7 +63,7 @@ func runExport(args []string) error {
 	}
 
 	visited := visitedFlags(fs)
-	overrideWithFlags(&cfg, visited, bundlePath, project, projectURL, outputDir, assetsDir, writeReadme, writeWarning, preserveLink)
+	overrideWithFlags(&cfg, visited, bundlePath, cookieFile, project, projectURL, urlList, outputDir, assetsDir, writeReadme, writeWarning, preserveLink)
 
 	if err := cfg.Validate(); err != nil {
 		return err
@@ -74,8 +78,10 @@ func printExportHelp(w io.Writer) {
 
 Options:
   --bundle <dir>         Path to ChatGPT official export directory
+  --cookie-file <path>   File that contains the ChatGPT session cookie header
   --project <name>       Project name inside the bundle
   --project-url <url>    ChatGPT project URL
+  --url-list <path>      Text file with one ChatGPT project URL per line
   --output <dir>         Output directory
   --assets-dir <dir>     Assets directory override
   --config <path>        Optional config file
@@ -87,6 +93,8 @@ Options:
 Examples:
   cgme export --bundle ./chatgpt-export --output ./my-notes
   cgme export --bundle ./chatgpt-export --project "Classic Math" --output ./my-notes
+  cgme export --cookie-file ~/Desktop/gpt-cookie.txt --project-url "https://chatgpt.com/..." --output ./my-notes
+  cgme export --cookie-file ~/Desktop/gpt-cookie.txt --url-list ~/Desktop/math-sessions.txt --output ./my-notes
   cgme export --project-url "https://chatgpt.com/..." --output ./my-notes
   cgme export --config ./cgme.yaml
 `)
@@ -96,8 +104,10 @@ func overrideWithFlags(
 	cfg *config.Config,
 	visited map[string]bool,
 	bundlePath string,
+	cookieFile string,
 	project string,
 	projectURL string,
+	urlList string,
 	outputDir string,
 	assetsDir string,
 	writeReadme bool,
@@ -114,6 +124,13 @@ func overrideWithFlags(
 	if projectURL != "" {
 		cfg.Source.Type = "project_url"
 		cfg.Source.ProjectURL = projectURL
+	}
+	if urlList != "" {
+		cfg.Source.Type = "project_url_list"
+		cfg.Source.URLList = urlList
+	}
+	if cookieFile != "" {
+		cfg.Source.CookieFile = cookieFile
 	}
 	if outputDir != "" {
 		cfg.Output.Dir = outputDir

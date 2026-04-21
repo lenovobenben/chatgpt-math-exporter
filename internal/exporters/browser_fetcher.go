@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,11 +18,24 @@ import (
 const chromeAppPath = "/Applications/Google Chrome.app"
 const chromeDebugPortEnv = "CGME_CHROME_DEBUG_PORT"
 const browserWaitEnv = "CGME_BROWSER_WAIT_SECONDS"
+const browserProfileRootEnv = "CGME_CHROME_PROFILE_ROOT"
+
+var osStat = os.Stat
+var execLookPath = exec.LookPath
+var cdpReady = isCDPReady
+var ensureBrowserProfile = ensureBrowserProfileRoot
+var ensureChromeSession = ensureChromeDebuggingSession
+var runCDPExtraction = runCDPDOMExtraction
 
 type CDPBrowserProjectFetcher struct {
-	chromePath   string
-	waitAfter    time.Duration
-	cookieHeader string
+	chromePath    string
+	waitAfter     time.Duration
+	cookieHeader  string
+	profileRoot   string
+	debugPort     int
+	bootAttempted bool
+	sessionReady  bool
+	launchErr     error
 }
 
 type CompositeProjectFetcher struct {
@@ -39,6 +53,13 @@ type browserConversationPayload struct {
 type browserConversationMsg struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
+}
+
+type browserDiscoveryPayload struct {
+	Title string                       `json:"title"`
+	URL   string                       `json:"url"`
+	Links []discoveredConversationLink `json:"links"`
+	Error string                       `json:"error"`
 }
 
 func (c CompositeProjectFetcher) FetchConversation(ctx context.Context, info ProjectURLInfo) (FetchedConversation, error) {
@@ -68,18 +89,19 @@ func (c CompositeProjectFetcher) FetchConversation(ctx context.Context, info Pro
 	}
 }
 
-func newBrowserProjectFetcher() (ProjectFetcher, bool) {
+func newBrowserProjectFetcher(cookieHeader string) (ProjectFetcher, bool) {
 	if runtime.GOOS != "darwin" {
 		return nil, false
 	}
-	if _, err := os.Stat(chromeAppPath); err != nil {
+	if _, err := osStat(chromeAppPath); err != nil {
 		return nil, false
 	}
-	if _, err := exec.LookPath("node"); err != nil {
+	if _, err := execLookPath("node"); err != nil {
 		return nil, false
 	}
-	cookieHeader := strings.TrimSpace(os.Getenv(sessionCookieEnv))
-	if cookieHeader == "" {
+	cookieHeader = strings.TrimSpace(cookieHeader)
+	port := chromeDebugPort()
+	if cookieHeader == "" && !cdpReady(context.Background(), port) {
 		return nil, false
 	}
 
@@ -87,6 +109,8 @@ func newBrowserProjectFetcher() (ProjectFetcher, bool) {
 		chromePath:   chromeAppPath,
 		waitAfter:    browserWaitDuration(),
 		cookieHeader: cookieHeader,
+		profileRoot:  browserProfileRoot(),
+		debugPort:    port,
 	}, true
 }
 
@@ -97,36 +121,19 @@ func (f *CDPBrowserProjectFetcher) FetchConversation(ctx context.Context, info P
 			Message: "The project URL does not contain a conversation identifier.",
 		}
 	}
-	if strings.TrimSpace(f.cookieHeader) == "" {
+	if strings.TrimSpace(f.cookieHeader) == "" && !cdpReady(ctx, f.debugPort) {
 		return FetchedConversation{}, &ProjectFetchError{
 			Code:    "source.project_url.session_cookie_missing",
-			Message: fmt.Sprintf("Set %s to a valid ChatGPT session cookie before project URL export can fetch live data.", sessionCookieEnv),
+			Message: fmt.Sprintf("Set %s to a valid ChatGPT session cookie before the first project URL export, or keep the CGME Chrome session running for reuse.", sessionCookieEnv),
 		}
 	}
 
-	profileRoot, err := createTempBrowserProfileRoot()
+	port, launched, err := f.ensureSession(ctx)
 	if err != nil {
-		return FetchedConversation{}, &ProjectFetchError{
-			Code:    "source.project_url.browser_profile_prepare_failed",
-			Message: fmt.Sprintf("Failed to prepare temporary browser profile: %v", err),
-		}
+		return FetchedConversation{}, err
 	}
-	defer os.RemoveAll(profileRoot)
 
-	chromeCmd, port, err := launchChromeWithDebugging(ctx, f.chromePath, profileRoot)
-	if err != nil {
-		return FetchedConversation{}, &ProjectFetchError{
-			Code:    "source.project_url.browser_launch_failed",
-			Message: fmt.Sprintf("Failed to launch Chrome with DevTools enabled: %v", err),
-		}
-	}
-	defer func() {
-		if chromeCmd.Process != nil {
-			_ = chromeCmd.Process.Kill()
-		}
-	}()
-
-	payload, err := runCDPDOMExtraction(ctx, port, buildConversationPageURL(info), f.cookieHeader, f.waitAfter)
+	payload, err := runCDPExtraction(ctx, port, buildConversationPageURL(info), f.cookieHeader, f.waitAfter)
 	if err != nil {
 		return FetchedConversation{}, &ProjectFetchError{
 			Code:    "source.project_url.browser_cdp_failed",
@@ -160,62 +167,142 @@ func (f *CDPBrowserProjectFetcher) FetchConversation(ctx context.Context, info P
 	return FetchedConversation{
 		ProjectName: firstNonEmpty(payload.Title, info.GPTSlug, "chatgpt-project"),
 		Messages:    messages,
-		Warnings:    warnings,
+		Warnings:    appendSessionWarnings(warnings, launched),
 	}, nil
 }
 
-func createTempBrowserProfileRoot() (string, error) {
-	root, err := os.MkdirTemp("", "cgme-chrome-profile-*")
+func (f *CDPBrowserProjectFetcher) DiscoverProjectPageURLs(ctx context.Context, pageURL string) ([]discoveredConversationLink, error) {
+	if strings.TrimSpace(f.cookieHeader) == "" && !cdpReady(ctx, f.debugPort) {
+		return nil, fmt.Errorf("set %s to a valid ChatGPT session cookie before the first discovery run, or reuse an existing CGME Chrome session", sessionCookieEnv)
+	}
+
+	port, _, err := f.ensureSession(ctx)
 	if err != nil {
-		return "", err
+		return nil, err
+	}
+
+	payload, err := runCDPDiscovery(ctx, port, pageURL, buildProjectConversationPrefix(pageURL), f.cookieHeader, f.waitAfter)
+	if err != nil {
+		return nil, err
+	}
+	if payload.Error != "" {
+		return nil, fmt.Errorf(payload.Error)
+	}
+	return payload.Links, nil
+}
+
+func (f *CDPBrowserProjectFetcher) ensureSession(ctx context.Context) (int, bool, error) {
+	if f.sessionReady && cdpReady(ctx, f.debugPort) {
+		return f.debugPort, false, nil
+	}
+	if f.bootAttempted {
+		if f.launchErr != nil {
+			return 0, false, f.launchErr
+		}
+		if f.sessionReady {
+			return 0, false, &ProjectFetchError{
+				Code:    "source.project_url.browser_session_lost",
+				Message: fmt.Sprintf("The reusable Chrome debugging session on port %d is no longer reachable.", f.debugPort),
+			}
+		}
+	}
+
+	f.bootAttempted = true
+	if cdpReady(ctx, f.debugPort) {
+		f.sessionReady = true
+		return f.debugPort, false, nil
+	}
+
+	profileRoot, err := ensureBrowserProfile(f.profileRoot)
+	if err != nil {
+		f.launchErr = &ProjectFetchError{
+			Code:    "source.project_url.browser_profile_prepare_failed",
+			Message: fmt.Sprintf("Failed to prepare browser profile root: %v", err),
+		}
+		return 0, false, f.launchErr
+	}
+	port, launched, err := ensureChromeSession(ctx, f.chromePath, profileRoot, f.debugPort)
+	if err != nil {
+		f.launchErr = &ProjectFetchError{
+			Code:    "source.project_url.browser_launch_failed",
+			Message: fmt.Sprintf("Failed to launch Chrome with DevTools enabled: %v", err),
+		}
+		return 0, false, f.launchErr
+	}
+	f.sessionReady = true
+	f.launchErr = nil
+	return port, launched, nil
+}
+
+func ensureBrowserProfileRoot(root string) (string, error) {
+	if strings.TrimSpace(root) == "" {
+		root = browserProfileRoot()
 	}
 	if err := os.MkdirAll(filepath.Join(root, "Default"), 0o700); err != nil {
 		return "", err
 	}
-	if err := os.WriteFile(filepath.Join(root, "Local State"), []byte(`{"profile":{"last_used":"Default"}}`), 0o600); err != nil {
-		return "", err
+	localState := filepath.Join(root, "Local State")
+	if _, err := os.Stat(localState); err != nil {
+		if !os.IsNotExist(err) {
+			return "", err
+		}
+		if err := os.WriteFile(localState, []byte(`{"profile":{"last_used":"Default"}}`), 0o600); err != nil {
+			return "", err
+		}
 	}
 	return root, nil
 }
 
-func launchChromeWithDebugging(ctx context.Context, chromePath, profileRoot string) (*exec.Cmd, int, error) {
-	port := chromeDebugPort()
+func ensureChromeDebuggingSession(ctx context.Context, chromePath, profileRoot string, port int) (int, bool, error) {
+	if cdpReady(ctx, port) {
+		return port, false, nil
+	}
 	cmd := exec.CommandContext(ctx, filepath.Join(chromePath, "Contents", "MacOS", "Google Chrome"),
 		fmt.Sprintf("--remote-debugging-port=%d", port),
 		"--user-data-dir="+profileRoot,
 		"--profile-directory=Default",
+		"--no-first-run",
+		"--no-default-browser-check",
+		"--disable-background-networking",
+		"--disable-features=DialMediaRouteProvider,OptimizationHints,MediaRouter",
 		"about:blank",
 	)
 	if err := cmd.Start(); err != nil {
-		return nil, 0, err
+		return 0, false, err
 	}
 	if err := waitForCDPReady(ctx, port, 10*time.Second); err != nil {
 		_ = cmd.Process.Kill()
-		return nil, 0, err
+		return 0, false, err
 	}
-	return cmd, port, nil
+	return port, true, nil
 }
 
 func waitForCDPReady(ctx context.Context, port int, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
-	client := &http.Client{Timeout: time.Second}
-	url := fmt.Sprintf("http://127.0.0.1:%d/json/version", port)
 	for {
 		if time.Now().After(deadline) {
 			return fmt.Errorf("timed out waiting for Chrome DevTools on port %d", port)
 		}
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-		if err == nil {
-			resp, err := client.Do(req)
-			if err == nil {
-				resp.Body.Close()
-				if resp.StatusCode == http.StatusOK {
-					return nil
-				}
-			}
+		if cdpReady(ctx, port) {
+			return nil
 		}
 		time.Sleep(250 * time.Millisecond)
 	}
+}
+
+func isCDPReady(ctx context.Context, port int) bool {
+	client := &http.Client{Timeout: time.Second}
+	url := fmt.Sprintf("http://127.0.0.1:%d/json/version", port)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return false
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode == http.StatusOK
 }
 
 func runCDPDOMExtraction(ctx context.Context, port int, pageURL, cookieHeader string, waitAfter time.Duration) (browserConversationPayload, error) {
@@ -275,8 +362,12 @@ async function connectWS(url) {
   return ws;
 }
 (async () => {
-  const newTarget = await fetch('http://127.0.0.1:%d/json/new?' + encodeURIComponent('about:blank'), { method: 'PUT' }).then(r => r.json());
-  const ws = await connectWS(newTarget.webSocketDebuggerUrl);
+  const targets = await fetch('http://127.0.0.1:%d/json/list').then(r => r.json());
+  let target = targets.find(t => t.type === 'page' && (t.url === 'about:blank' || (t.url || '').startsWith('https://chatgpt.com/')));
+  if (!target) {
+    target = await fetch('http://127.0.0.1:%d/json/new?' + encodeURIComponent('about:blank'), { method: 'PUT' }).then(r => r.json());
+  }
+  const ws = await connectWS(target.webSocketDebuggerUrl);
   let id = 0;
   const pending = new Map();
   const send = (method, params = {}) => new Promise((resolve, reject) => {
@@ -313,7 +404,7 @@ async function connectWS(url) {
   console.log(JSON.stringify({ title: '', url: '', snippet: '', messages: [], error: String(err) }));
   process.exit(0);
 });
-`, pageURL, cookieHeader, waitMS, port, expression)
+`, pageURL, cookieHeader, waitMS, port, port, expression)
 
 	cmd := exec.CommandContext(ctx, "node", "-e", script)
 	out, err := cmd.CombinedOutput()
@@ -321,6 +412,229 @@ async function connectWS(url) {
 		return browserConversationPayload{}, fmt.Errorf("node cdp extraction failed: %v: %s", err, strings.TrimSpace(string(out)))
 	}
 	return parseBrowserConversationPayload(strings.TrimSpace(string(out)))
+}
+
+func runCDPDiscovery(ctx context.Context, port int, pageURL, projectPrefix, cookieHeader string, waitAfter time.Duration) (browserDiscoveryPayload, error) {
+	waitMS := int(waitAfter / time.Millisecond)
+	if waitMS < 1500 {
+		waitMS = 1500
+	}
+
+	expression := `(() => {
+  const projectPrefix = %q;
+  const normalizeHref = (href) => {
+    try {
+      return new URL(href, location.origin).toString();
+    } catch {
+      return '';
+    }
+  };
+  const isProjectConversationHref = (href) => !!href && (!projectPrefix || href.startsWith(projectPrefix));
+  const collectLinks = (root) => {
+    const seen = new Set();
+    const links = [];
+    const scope = root || document;
+    for (const anchor of Array.from(scope.querySelectorAll('a[href]'))) {
+      const href = normalizeHref(anchor.getAttribute('href') || '');
+      if (!href || !isProjectConversationHref(href) || seen.has(href)) continue;
+      const rect = anchor.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) continue;
+      seen.add(href);
+      const title = (anchor.innerText || anchor.textContent || '').trim();
+      links.push({ title, url: href });
+    }
+    return links;
+  };
+  const isVisibleBox = (el) => {
+    const rect = el.getBoundingClientRect();
+    return rect.width > 160 && rect.height > 120;
+  };
+  const findMainRoot = () => {
+    const direct = document.querySelector('main,[role="main"]');
+    if (direct) return direct;
+    const candidates = Array.from(document.querySelectorAll('main,[role="main"],section,div'));
+    let best = document.body;
+    let bestScore = -1;
+    for (const el of candidates) {
+      const rect = el.getBoundingClientRect();
+      if (rect.width < 240 || rect.height < 240) continue;
+      if (rect.right < window.innerWidth * 0.45) continue;
+      const count = collectLinks(el).length;
+      const score = count * 10000 + rect.width * rect.height;
+      if (score > bestScore) {
+        best = el;
+        bestScore = score;
+      }
+    }
+    return best || document.body;
+  };
+  const isScrollable = (el) => {
+    if (!el) return false;
+    const style = getComputedStyle(el);
+    if (!style) return false;
+    const overflowY = style.overflowY || '';
+    return (overflowY === 'auto' || overflowY === 'scroll') && el.scrollHeight > el.clientHeight + 50;
+  };
+  const loadMorePattern = /(加载更多对话|加载更多聊天|加载更多|Load more chats|Load more conversations|Load more)/i;
+  const findLoadMoreButton = (root) => {
+    const scope = root || document;
+    for (const el of Array.from(scope.querySelectorAll('button,[role="button"]'))) {
+      const text = (el.innerText || el.textContent || '').trim();
+      if (!text || !loadMorePattern.test(text)) continue;
+      return el;
+    }
+    return null;
+  };
+  const findScrollContainer = (root) => {
+    const candidates = [];
+    for (const el of [root, ...Array.from(root.querySelectorAll('*'))]) {
+      if (!isScrollable(el) || !isVisibleBox(el)) continue;
+      const rect = el.getBoundingClientRect();
+      if (rect.right < window.innerWidth * 0.45) continue;
+      const anchorCount = collectLinks(el).length;
+      const score = anchorCount * 10000 + rect.height * rect.width + (rect.left > window.innerWidth * 0.2 ? 5000 : 0);
+      candidates.push({ el, score });
+    }
+    candidates.sort((a, b) => b.score - a.score);
+    if (candidates.length > 0) return candidates[0].el;
+    return isScrollable(document.scrollingElement || document.documentElement)
+      ? (document.scrollingElement || document.documentElement)
+      : root;
+  };
+  const scrollOneStep = (el) => {
+    const step = Math.max(Math.floor((el.clientHeight || window.innerHeight || 800) * 0.85), 480);
+    const before = el === document.scrollingElement || el === document.documentElement || el === document.body
+      ? (window.scrollY || document.documentElement.scrollTop || 0)
+      : el.scrollTop;
+    if (el === document.scrollingElement || el === document.documentElement || el === document.body) {
+      window.scrollTo(0, before + step);
+      return (window.scrollY || document.documentElement.scrollTop || 0) > before;
+    }
+    try {
+      el.scrollTop = before + step;
+    } catch {}
+    return el.scrollTop > before;
+  };
+  return (async () => {
+    const root = findMainRoot();
+    let stableRounds = 0;
+    let stagnantScrollRounds = 0;
+    let lastCount = -1;
+    for (let round = 0; round < 80; round++) {
+      const beforeCount = collectLinks(root).length;
+      const loadMore = findLoadMoreButton(root);
+      let moved = false;
+      if (loadMore) {
+        try {
+          loadMore.scrollIntoView({ block: 'center' });
+        } catch {}
+        try {
+          loadMore.click();
+        } catch {}
+        moved = true;
+      } else {
+        const container = findScrollContainer(root);
+        moved = scrollOneStep(container);
+      }
+      if (!moved) stagnantScrollRounds++;
+      else stagnantScrollRounds = 0;
+      await new Promise(r => setTimeout(r, loadMore ? 900 : 450));
+      const count = collectLinks(root).length;
+      if (count === lastCount && count === beforeCount) stableRounds++;
+      else stableRounds = 0;
+      lastCount = count;
+      if (stableRounds >= 4 && stagnantScrollRounds >= 2) break;
+    }
+    return JSON.stringify({
+      title: document.title.replace(/\s*-\s*ChatGPT$/, ''),
+      url: location.href,
+      links: collectLinks(root),
+      error: ''
+    });
+  })();
+})()`
+
+	script := fmt.Sprintf(`
+const targetUrl = %q;
+const cookieHeader = %q;
+const waitMS = %d;
+async function connectWS(url) {
+  const ws = new WebSocket(url);
+  await new Promise((resolve, reject) => {
+    ws.addEventListener('open', resolve, { once: true });
+    ws.addEventListener('error', reject, { once: true });
+  });
+  return ws;
+}
+(async () => {
+  const targets = await fetch('http://127.0.0.1:%d/json/list').then(r => r.json());
+  let target = targets.find(t => t.type === 'page' && (t.url === 'about:blank' || (t.url || '').startsWith('https://chatgpt.com/')));
+  if (!target) {
+    target = await fetch('http://127.0.0.1:%d/json/new?' + encodeURIComponent('about:blank'), { method: 'PUT' }).then(r => r.json());
+  }
+  const ws = await connectWS(target.webSocketDebuggerUrl);
+  let id = 0;
+  const pending = new Map();
+  const send = (method, params = {}) => new Promise((resolve, reject) => {
+    const msgId = ++id;
+    pending.set(msgId, { resolve, reject });
+    ws.send(JSON.stringify({ id: msgId, method, params }));
+  });
+  ws.addEventListener('message', event => {
+    const msg = JSON.parse(event.data);
+    if (msg.id && pending.has(msg.id)) {
+      const pair = pending.get(msg.id);
+      pending.delete(msg.id);
+      if (msg.error) pair.reject(new Error(JSON.stringify(msg.error)));
+      else pair.resolve(msg.result);
+    }
+  });
+  await send('Page.enable');
+  await send('Runtime.enable');
+  await send('Network.enable');
+  for (const pair of cookieHeader.split(/;\s*/)) {
+    const eq = pair.indexOf('=');
+    if (eq <= 0) continue;
+    await send('Network.setCookie', { url: 'https://chatgpt.com/', name: pair.slice(0, eq), value: pair.slice(eq + 1), secure: true }).catch(() => {});
+  }
+  await send('Page.navigate', { url: targetUrl });
+  await new Promise(r => setTimeout(r, waitMS));
+  const result = await send('Runtime.evaluate', {
+    expression: %q,
+    awaitPromise: true,
+    returnByValue: true,
+  });
+  console.log(result.result.value);
+  ws.close();
+})().catch(err => {
+  console.log(JSON.stringify({ title: '', url: '', links: [], error: String(err) }));
+  process.exit(0);
+});
+`, pageURL, cookieHeader, waitMS, port, port, fmt.Sprintf(expression, projectPrefix))
+
+	cmd := exec.CommandContext(ctx, "node", "-e", script)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return browserDiscoveryPayload{}, fmt.Errorf("node cdp discovery failed: %v: %s", err, strings.TrimSpace(string(out)))
+	}
+
+	var payload browserDiscoveryPayload
+	if err := json.Unmarshal([]byte(strings.TrimSpace(string(out))), &payload); err != nil {
+		return browserDiscoveryPayload{}, err
+	}
+	return payload, nil
+}
+
+func buildProjectConversationPrefix(pageURL string) string {
+	u, err := url.Parse(strings.TrimSpace(pageURL))
+	if err != nil {
+		return ""
+	}
+	parts := splitURLPath(u.Path)
+	if len(parts) < 2 || parts[0] != "g" {
+		return ""
+	}
+	return fmt.Sprintf("https://%s/g/%s/c/", u.Host, parts[1])
 }
 
 func parseBrowserConversationPayload(output string) (browserConversationPayload, error) {
@@ -355,6 +669,16 @@ func browserDOMEmptyMessage(payload browserConversationPayload) string {
 		parts = append(parts, fmt.Sprintf("snippet=%q", payload.Snippet))
 	}
 	return strings.Join(parts, " ")
+}
+
+func appendSessionWarnings(warnings []warningRecord, launched bool) []warningRecord {
+	if launched {
+		return append(warnings, warningRecord{
+			Code:    "source.project_url.browser_session_started",
+			Message: "Started a reusable Chrome debugging session for CGME project URL export.",
+		})
+	}
+	return warnings
 }
 
 func normalizeBrowserMessages(messages []Message) ([]Message, []warningRecord) {
@@ -468,4 +792,15 @@ func chromeDebugPort() int {
 		return 9223
 	}
 	return port
+}
+
+func browserProfileRoot() string {
+	if override := strings.TrimSpace(os.Getenv(browserProfileRootEnv)); override != "" {
+		return override
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return filepath.Join(os.TempDir(), "cgme-browser-profile")
+	}
+	return filepath.Join(home, "Library", "Application Support", "cgme", "browser-profile")
 }
