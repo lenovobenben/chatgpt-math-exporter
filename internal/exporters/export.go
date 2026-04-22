@@ -314,8 +314,13 @@ func exportProjectURL(cfg config.Config, fetcher ProjectFetcher, rawURL string, 
 			Message: fmt.Sprintf("Project URL fetch returned %d message(s) and was rendered into Markdown.", len(fetched.Messages)),
 		})
 
+		dirName := liveConversationDirName(conv, 1)
+		conversationDir := filepath.Join(projectDir, dirName)
+		if err := os.MkdirAll(conversationDir, 0o755); err != nil {
+			return projectURLExportResult{}, fmt.Errorf("create conversation directory %q: %w", conversationDir, err)
+		}
 		filename := liveConversationFilename(conv, 1)
-		outputPath := filepath.Join(projectDir, filename)
+		outputPath := filepath.Join(conversationDir, filename)
 		if !opts.Overwrite && fileExists(outputPath) {
 			warnings = append(warnings, warningRecord{
 				Code:    "source.project_url.skipped_existing",
@@ -339,7 +344,7 @@ func exportProjectURL(cfg config.Config, fetcher ProjectFetcher, rawURL string, 
 		if err := os.WriteFile(outputPath, []byte(rendered), 0o644); err != nil {
 			return projectURLExportResult{}, fmt.Errorf("write conversation markdown %q: %w", filename, err)
 		}
-		placeholderPath := filepath.Join(projectDir, "001_placeholder.md")
+		placeholderPath := filepath.Join(conversationDir, "001_placeholder.md")
 		if err := os.Remove(placeholderPath); err == nil {
 			warnings = append(warnings, warningRecord{
 				Code:    "source.project_url.stale_placeholder_removed",
@@ -390,7 +395,11 @@ func exportProjectURL(cfg config.Config, fetcher ProjectFetcher, rawURL string, 
 			if err := os.MkdirAll(projectDir, 0o755); err != nil {
 				return projectURLExportResult{}, fmt.Errorf("create project directory %q: %w", projectDir, err)
 			}
-			placeholderPath := filepath.Join(projectDir, "001_placeholder.md")
+			conversationDir := filepath.Join(projectDir, livePlaceholderDirName(projectName, urlInfo, 1))
+			if err := os.MkdirAll(conversationDir, 0o755); err != nil {
+				return projectURLExportResult{}, fmt.Errorf("create conversation directory %q: %w", conversationDir, err)
+			}
+			placeholderPath := filepath.Join(conversationDir, "001_placeholder.md")
 			if err := writePlaceholderConversation(placeholderPath, cfg, projectName, urlInfo, fetchErr, rawURL); err != nil {
 				return projectURLExportResult{}, err
 			}
@@ -465,11 +474,33 @@ func conversationFileBase(title string, index int) string {
 }
 
 func liveConversationFilename(conv Conversation, index int) string {
+	return liveConversationStem(conv, index) + ".md"
+}
+
+func liveConversationDirName(conv Conversation, index int) string {
+	return liveConversationStem(conv, index)
+}
+
+func liveConversationStem(conv Conversation, index int) string {
 	base := slugify(conversationFileBase(conv.Title, index))
 	if id := strings.TrimSpace(conv.ID); id != "" {
-		return fmt.Sprintf("%03d_%s__%s.md", index, base, slugify(id))
+		return fmt.Sprintf("%03d_%s__%s", index, base, slugify(id))
 	}
-	return fmt.Sprintf("%03d_%s.md", index, base)
+	return fmt.Sprintf("%03d_%s", index, base)
+}
+
+func livePlaceholderDirName(projectName string, urlInfo ProjectURLInfo, index int) string {
+	base := slugify(projectName)
+	if base == "" {
+		base = slugify(urlInfo.GPTSlug)
+	}
+	if base == "" {
+		base = "chatgpt-project"
+	}
+	if id := strings.TrimSpace(urlInfo.ConversationID); id != "" {
+		return fmt.Sprintf("%03d_%s__%s", index, base, slugify(id))
+	}
+	return fmt.Sprintf("%03d_%s", index, base)
 }
 
 func writePlaceholderConversation(path string, cfg config.Config, projectName string, urlInfo ProjectURLInfo, fetchErr error, rawURL string) error {

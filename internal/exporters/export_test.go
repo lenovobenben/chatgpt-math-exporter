@@ -391,11 +391,11 @@ func TestProjectFetcherRejectsEmptyCookieFile(t *testing.T) {
 
 func TestRunProjectURLExportWritesFetchedMarkdown(t *testing.T) {
 	outputDir := t.TempDir()
-	projectDir := filepath.Join(outputDir, "fetched-algebra")
-	if err := os.MkdirAll(projectDir, 0o755); err != nil {
-		t.Fatalf("mkdir project dir: %v", err)
+	conversationDir := filepath.Join(outputDir, "fetched-algebra", "001_fetched-algebra__69b8017a-69a0-8328-b934-c6fced4a3c0d")
+	if err := os.MkdirAll(conversationDir, 0o755); err != nil {
+		t.Fatalf("mkdir conversation dir: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(projectDir, "001_placeholder.md"), []byte("stale"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(conversationDir, "001_placeholder.md"), []byte("stale"), 0o644); err != nil {
 		t.Fatalf("write stale placeholder: %v", err)
 	}
 
@@ -438,7 +438,7 @@ func TestRunProjectURLExportWritesFetchedMarkdown(t *testing.T) {
 		t.Fatalf("Run() error = %v", err)
 	}
 
-	content, err := os.ReadFile(filepath.Join(projectDir, "001_fetched-algebra__69b8017a-69a0-8328-b934-c6fced4a3c0d.md"))
+	content, err := os.ReadFile(filepath.Join(conversationDir, "001_fetched-algebra__69b8017a-69a0-8328-b934-c6fced4a3c0d.md"))
 	if err != nil {
 		t.Fatalf("read fetched markdown: %v", err)
 	}
@@ -452,7 +452,7 @@ func TestRunProjectURLExportWritesFetchedMarkdown(t *testing.T) {
 	if !strings.Contains(markdown, "```math\nx = \\pm1\n```") {
 		t.Fatalf("markdown missing math block: %s", markdown)
 	}
-	if _, err := os.Stat(filepath.Join(projectDir, "001_placeholder.md")); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(filepath.Join(conversationDir, "001_placeholder.md")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("placeholder should not exist on successful fetch, err=%v", err)
 	}
 
@@ -572,8 +572,8 @@ func TestRunProjectURLExportWritesPlaceholderForFetchFailure(t *testing.T) {
 		t.Fatalf("Run() error = %v", err)
 	}
 
-	projectDir := filepath.Join(outputDir, "jing-dian-shu-xue-ti-100li-6")
-	placeholderContent, err := os.ReadFile(filepath.Join(projectDir, "001_placeholder.md"))
+	placeholderPath := filepath.Join(outputDir, "jing-dian-shu-xue-ti-100li-6", "001_jing-dian-shu-xue-ti-100li-6__69b8017a-69a0-8328-b934-c6fced4a3c0d", "001_placeholder.md")
+	placeholderContent, err := os.ReadFile(placeholderPath)
 	if err != nil {
 		t.Fatalf("read placeholder: %v", err)
 	}
@@ -652,8 +652,8 @@ func TestRunProjectURLListExportWritesMultipleConversations(t *testing.T) {
 	}
 
 	for _, path := range []string{
-		filepath.Join(outputDir, "problem-one", "001_problem-one__conv-1.md"),
-		filepath.Join(outputDir, "problem-two", "001_problem-two__conv-2.md"),
+		filepath.Join(outputDir, "problem-one", "001_problem-one__conv-1", "001_problem-one__conv-1.md"),
+		filepath.Join(outputDir, "problem-two", "001_problem-two__conv-2", "001_problem-two__conv-2.md"),
 	} {
 		if _, err := os.Stat(path); err != nil {
 			t.Fatalf("expected exported markdown %q: %v", path, err)
@@ -743,10 +743,10 @@ func TestRunProjectURLListExportContinuesAndDoesNotWritePlaceholderOnFailure(t *
 		t.Fatalf("Run() error = %v", err)
 	}
 
-	if _, err := os.Stat(filepath.Join(outputDir, "problem-one", "001_problem-one__conv-1.md")); err != nil {
+	if _, err := os.Stat(filepath.Join(outputDir, "problem-one", "001_problem-one__conv-1", "001_problem-one__conv-1.md")); err != nil {
 		t.Fatalf("expected successful export: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(outputDir, "problem-two", "001_placeholder.md")); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(filepath.Join(outputDir, "problem-two", "001_problem-two__conv-2", "001_placeholder.md")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("did not expect placeholder for failed batch item, err=%v", err)
 	}
 
@@ -815,7 +815,7 @@ func TestRunProjectURLListExportContinuesAfterPerURLTimeout(t *testing.T) {
 		t.Fatalf("Run() error = %v", err)
 	}
 
-	if _, err := os.Stat(filepath.Join(outputDir, "problem-two", "001_problem-two__conv-2.md")); err != nil {
+	if _, err := os.Stat(filepath.Join(outputDir, "problem-two", "001_problem-two__conv-2", "001_problem-two__conv-2.md")); err != nil {
 		t.Fatalf("expected second export to continue after timeout: %v", err)
 	}
 
@@ -843,7 +843,7 @@ func TestRunProjectURLListExportSkipsCompletedEntriesByDefault(t *testing.T) {
 		t.Fatalf("write url list: %v", err)
 	}
 
-	projectDir := filepath.Join(outputDir, "problem-one")
+	projectDir := filepath.Join(outputDir, "problem-one", "001_problem-one__conv-1")
 	if err := os.MkdirAll(projectDir, 0o755); err != nil {
 		t.Fatalf("mkdir project dir: %v", err)
 	}
@@ -920,7 +920,7 @@ func TestRunProjectURLListExportOverwriteRefetches(t *testing.T) {
 		t.Fatalf("write url list: %v", err)
 	}
 
-	projectDir := filepath.Join(outputDir, "problem-one")
+	projectDir := filepath.Join(outputDir, "problem-one", "001_problem-one__conv-1")
 	if err := os.MkdirAll(projectDir, 0o755); err != nil {
 		t.Fatalf("mkdir project dir: %v", err)
 	}
