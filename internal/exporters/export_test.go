@@ -438,7 +438,7 @@ func TestRunProjectURLExportWritesFetchedMarkdown(t *testing.T) {
 		t.Fatalf("Run() error = %v", err)
 	}
 
-	content, err := os.ReadFile(filepath.Join(projectDir, "001_fetched-algebra.md"))
+	content, err := os.ReadFile(filepath.Join(projectDir, "001_fetched-algebra__69b8017a-69a0-8328-b934-c6fced4a3c0d.md"))
 	if err != nil {
 		t.Fatalf("read fetched markdown: %v", err)
 	}
@@ -652,8 +652,8 @@ func TestRunProjectURLListExportWritesMultipleConversations(t *testing.T) {
 	}
 
 	for _, path := range []string{
-		filepath.Join(outputDir, "problem-one", "001_problem-one.md"),
-		filepath.Join(outputDir, "problem-two", "001_problem-two.md"),
+		filepath.Join(outputDir, "problem-one", "001_problem-one__conv-1.md"),
+		filepath.Join(outputDir, "problem-two", "001_problem-two__conv-2.md"),
 	} {
 		if _, err := os.Stat(path); err != nil {
 			t.Fatalf("expected exported markdown %q: %v", path, err)
@@ -743,7 +743,7 @@ func TestRunProjectURLListExportContinuesAndDoesNotWritePlaceholderOnFailure(t *
 		t.Fatalf("Run() error = %v", err)
 	}
 
-	if _, err := os.Stat(filepath.Join(outputDir, "problem-one", "001_problem-one.md")); err != nil {
+	if _, err := os.Stat(filepath.Join(outputDir, "problem-one", "001_problem-one__conv-1.md")); err != nil {
 		t.Fatalf("expected successful export: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(outputDir, "problem-two", "001_placeholder.md")); !errors.Is(err, os.ErrNotExist) {
@@ -763,6 +763,78 @@ func TestRunProjectURLListExportContinuesAndDoesNotWritePlaceholderOnFailure(t *
 	}
 }
 
+func TestRunProjectURLListExportContinuesAfterPerURLTimeout(t *testing.T) {
+	outputDir := t.TempDir()
+	urlListPath := filepath.Join(t.TempDir(), "urls.txt")
+	if err := os.WriteFile(urlListPath, []byte(strings.Join([]string{
+		"https://chatgpt.com/g/g-p-1/c/conv-1",
+		"https://chatgpt.com/g/g-p-1/c/conv-2",
+	}, "\n")), 0o644); err != nil {
+		t.Fatalf("write url list: %v", err)
+	}
+
+	originalFactory := projectFetcherFactory
+	originalTimeout := projectURLFetchTimeout
+	projectURLFetchTimeout = 20 * time.Millisecond
+	projectFetcherFactory = func(cfg config.Config) ProjectFetcher {
+		return timeoutStubProjectFetcher{
+			blockedConversation: "conv-1",
+			routes: map[string]FetchedConversation{
+				"conv-2": {
+					ProjectName: "Problem Two",
+					Messages: []Message{
+						{Role: "user", Content: "Question 2"},
+						{Role: "assistant", Content: "Answer 2"},
+					},
+				},
+			},
+		}
+	}
+	defer func() {
+		projectFetcherFactory = originalFactory
+		projectURLFetchTimeout = originalTimeout
+	}()
+
+	cfg := config.Config{
+		Source: config.SourceConfig{
+			Type:    "project_url_list",
+			URLList: urlListPath,
+		},
+		Output: config.OutputConfig{
+			Dir:       outputDir,
+			AssetsDir: filepath.Join(outputDir, "assets"),
+		},
+		Options: config.OptionConfig{
+			WriteReadme:   true,
+			WriteWarnings: true,
+			PreserveLinks: true,
+		},
+	}
+
+	if err := Run(cfg); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(outputDir, "problem-two", "001_problem-two__conv-2.md")); err != nil {
+		t.Fatalf("expected second export to continue after timeout: %v", err)
+	}
+
+	reportContent, err := os.ReadFile(filepath.Join(outputDir, "export-report.json"))
+	if err != nil {
+		t.Fatalf("read export report: %v", err)
+	}
+	var report batchExportReport
+	if err := json.Unmarshal(reportContent, &report); err != nil {
+		t.Fatalf("unmarshal export report: %v", err)
+	}
+	if report.Summary.Success != 1 || report.Summary.Failed != 1 {
+		t.Fatalf("unexpected report summary: %#v", report.Summary)
+	}
+	if !strings.Contains(string(reportContent), "source.project_url.fetch_timeout") {
+		t.Fatalf("expected timeout error in report: %s", string(reportContent))
+	}
+}
+
 func TestRunProjectURLListExportSkipsCompletedEntriesByDefault(t *testing.T) {
 	outputDir := t.TempDir()
 	urlListPath := filepath.Join(t.TempDir(), "urls.txt")
@@ -775,7 +847,7 @@ func TestRunProjectURLListExportSkipsCompletedEntriesByDefault(t *testing.T) {
 	if err := os.MkdirAll(projectDir, 0o755); err != nil {
 		t.Fatalf("mkdir project dir: %v", err)
 	}
-	outputPath := filepath.Join(projectDir, "001_problem-one.md")
+	outputPath := filepath.Join(projectDir, "001_problem-one__conv-1.md")
 	if err := os.WriteFile(outputPath, []byte("existing"), 0o644); err != nil {
 		t.Fatalf("write existing export: %v", err)
 	}
@@ -852,7 +924,7 @@ func TestRunProjectURLListExportOverwriteRefetches(t *testing.T) {
 	if err := os.MkdirAll(projectDir, 0o755); err != nil {
 		t.Fatalf("mkdir project dir: %v", err)
 	}
-	outputPath := filepath.Join(projectDir, "001_problem-one.md")
+	outputPath := filepath.Join(projectDir, "001_problem-one__conv-1.md")
 	if err := os.WriteFile(outputPath, []byte("old"), 0o644); err != nil {
 		t.Fatalf("write existing export: %v", err)
 	}
@@ -1164,6 +1236,64 @@ func TestBrowserFetcherDoesNotRelaunchAfterStartupFailure(t *testing.T) {
 	}
 }
 
+func TestBrowserFetcherRelaunchesAfterSessionLoss(t *testing.T) {
+	origEnsureProfile := ensureBrowserProfile
+	origEnsureSession := ensureChromeSession
+	origRunCDP := runCDPExtraction
+	origCDPReady := cdpReady
+	defer func() {
+		ensureBrowserProfile = origEnsureProfile
+		ensureChromeSession = origEnsureSession
+		runCDPExtraction = origRunCDP
+		cdpReady = origCDPReady
+	}()
+
+	ensureBrowserProfile = func(root string) (string, error) { return root, nil }
+	launchCalls := 0
+	ensureChromeSession = func(ctx context.Context, chromePath, profileRoot string, port int) (int, bool, error) {
+		launchCalls++
+		return port, true, nil
+	}
+	runCDPExtraction = func(ctx context.Context, port int, pageURL, cookieHeader string, waitAfter time.Duration) (browserConversationPayload, error) {
+		return browserConversationPayload{
+			Title: "Recovered Session",
+			Messages: []browserConversationMsg{
+				{Role: "user", Content: "Q"},
+				{Role: "assistant", Content: "A"},
+			},
+		}, nil
+	}
+	cdpReady = func(ctx context.Context, port int) bool { return false }
+
+	fetcher := &CDPBrowserProjectFetcher{
+		chromePath:   chromeAppPath,
+		waitAfter:    time.Second,
+		cookieHeader: "session=test",
+		profileRoot:  "/tmp/cgme-browser-profile",
+		debugPort:    9223,
+	}
+
+	_, err := fetcher.FetchConversation(t.Context(), ProjectURLInfo{
+		Host:           "chatgpt.com",
+		ConversationID: "conv-1",
+	})
+	if err != nil {
+		t.Fatalf("initial fetch error = %v", err)
+	}
+
+	_, err = fetcher.FetchConversation(t.Context(), ProjectURLInfo{
+		Host:           "chatgpt.com",
+		ConversationID: "conv-2",
+	})
+	if err != nil {
+		t.Fatalf("recovery fetch error = %v", err)
+	}
+
+	if launchCalls != 2 {
+		t.Fatalf("expected relaunch after session loss, got %d launch attempt(s)", launchCalls)
+	}
+}
+
 func TestReadProjectURLList(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "urls.txt")
 	content := strings.Join([]string{
@@ -1314,4 +1444,23 @@ func (s discoveryStubFetcher) FetchConversation(ctx context.Context, info Projec
 
 func (s discoveryStubFetcher) DiscoverProjectPageURLs(ctx context.Context, pageURL string) ([]discoveredConversationLink, error) {
 	return s.links, s.err
+}
+
+type timeoutStubProjectFetcher struct {
+	blockedConversation string
+	routes              map[string]FetchedConversation
+}
+
+func (s timeoutStubProjectFetcher) FetchConversation(ctx context.Context, info ProjectURLInfo) (FetchedConversation, error) {
+	if info.ConversationID == s.blockedConversation {
+		<-ctx.Done()
+		return FetchedConversation{}, ctx.Err()
+	}
+	if fetched, ok := s.routes[info.ConversationID]; ok {
+		return fetched, nil
+	}
+	return FetchedConversation{}, &ProjectFetchError{
+		Code:    "source.project_url.missing_test_route",
+		Message: fmt.Sprintf("no timeout stub fetch route for conversation %q", info.ConversationID),
+	}
 }

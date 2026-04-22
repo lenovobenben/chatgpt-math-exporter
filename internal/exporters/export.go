@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -58,6 +59,7 @@ var imageMarkerPattern = regexp.MustCompile(`\[\[CGME_IMAGE:(\{.*?\})\]\]`)
 var newAssetHTTPClient = func() *http.Client {
 	return &http.Client{Timeout: 30 * time.Second}
 }
+var projectURLFetchTimeout = 75 * time.Second
 
 func Run(cfg config.Config) error {
 	if err := os.MkdirAll(cfg.Output.Dir, 0o755); err != nil {
@@ -271,7 +273,16 @@ func exportProjectURL(cfg config.Config, fetcher ProjectFetcher, rawURL string, 
 		return projectURLExportResult{}, err
 	}
 
-	fetched, fetchErr := fetcher.FetchConversation(context.Background(), urlInfo)
+	fetchCtx, cancel := context.WithTimeout(context.Background(), projectURLFetchTimeout)
+	defer cancel()
+
+	fetched, fetchErr := fetcher.FetchConversation(fetchCtx, urlInfo)
+	if fetchErr != nil && (errors.Is(fetchErr, context.DeadlineExceeded) || errors.Is(fetchCtx.Err(), context.DeadlineExceeded)) {
+		fetchErr = &ProjectFetchError{
+			Code:    "source.project_url.fetch_timeout",
+			Message: fmt.Sprintf("Timed out while exporting conversation %q after %s.", emptyFallback(urlInfo.ConversationID), projectURLFetchTimeout),
+		}
+	}
 
 	projectName := chooseProjectName(cfg, nil)
 	if cfg.Source.Project == "" && urlInfo.GPTSlug != "" {
@@ -303,7 +314,7 @@ func exportProjectURL(cfg config.Config, fetcher ProjectFetcher, rawURL string, 
 			Message: fmt.Sprintf("Project URL fetch returned %d message(s) and was rendered into Markdown.", len(fetched.Messages)),
 		})
 
-		filename := fmt.Sprintf("%03d_%s.md", 1, slugify(conversationFileBase(conv.Title, 1)))
+		filename := liveConversationFilename(conv, 1)
 		outputPath := filepath.Join(projectDir, filename)
 		if !opts.Overwrite && fileExists(outputPath) {
 			warnings = append(warnings, warningRecord{
@@ -451,6 +462,14 @@ func conversationFileBase(title string, index int) string {
 		return fmt.Sprintf("conversation-%03d", index)
 	}
 	return title
+}
+
+func liveConversationFilename(conv Conversation, index int) string {
+	base := slugify(conversationFileBase(conv.Title, index))
+	if id := strings.TrimSpace(conv.ID); id != "" {
+		return fmt.Sprintf("%03d_%s__%s.md", index, base, slugify(id))
+	}
+	return fmt.Sprintf("%03d_%s.md", index, base)
 }
 
 func writePlaceholderConversation(path string, cfg config.Config, projectName string, urlInfo ProjectURLInfo, fetchErr error, rawURL string) error {

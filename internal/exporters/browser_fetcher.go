@@ -199,12 +199,7 @@ func (f *CDPBrowserProjectFetcher) ensureSession(ctx context.Context) (int, bool
 		if f.launchErr != nil {
 			return 0, false, f.launchErr
 		}
-		if f.sessionReady {
-			return 0, false, &ProjectFetchError{
-				Code:    "source.project_url.browser_session_lost",
-				Message: fmt.Sprintf("The reusable Chrome debugging session on port %d is no longer reachable.", f.debugPort),
-			}
-		}
+		f.sessionReady = false
 	}
 
 	f.bootAttempted = true
