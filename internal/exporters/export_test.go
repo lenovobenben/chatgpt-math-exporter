@@ -690,6 +690,76 @@ func TestRunProjectURLListExportWritesMultipleConversations(t *testing.T) {
 	}
 }
 
+func TestRunProjectURLListExportSeparatesProjectNameAndConversationTitle(t *testing.T) {
+	outputDir := t.TempDir()
+	urlListPath := filepath.Join(t.TempDir(), "urls.txt")
+	urls := strings.Join([]string{
+		"https://chatgpt.com/g/g-p-demo/c/conv-1",
+		"",
+	}, "\n")
+	if err := os.WriteFile(urlListPath, []byte(urls), 0o644); err != nil {
+		t.Fatalf("write url list: %v", err)
+	}
+
+	originalFactory := projectFetcherFactory
+	projectFetcherFactory = func(cfg config.Config) ProjectFetcher {
+		return routedStubProjectFetcher{
+			routes: map[string]FetchedConversation{
+				"conv-1": {
+					ProjectName: "经典数学题100例 1",
+					Title:       "求圆的面积",
+					Messages: []Message{
+						{Role: "user", Content: "Question 1"},
+						{Role: "assistant", Content: "Answer 1"},
+					},
+				},
+			},
+		}
+	}
+	defer func() {
+		projectFetcherFactory = originalFactory
+	}()
+
+	cfg := config.Config{
+		Source: config.SourceConfig{
+			Type:    "project_url_list",
+			URLList: urlListPath,
+		},
+		Output: config.OutputConfig{
+			Dir:       outputDir,
+			AssetsDir: filepath.Join(outputDir, "assets"),
+		},
+		Options: config.OptionConfig{
+			WriteWarnings: true,
+		},
+	}
+
+	if err := Run(cfg); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	outputPath := filepath.Join(outputDir, "经典数学题100例-1", "001_求圆的面积__conv-1", "001_求圆的面积__conv-1.md")
+	content, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatalf("read exported markdown %q: %v", outputPath, err)
+	}
+	if !strings.Contains(string(content), "# 求圆的面积") {
+		t.Fatalf("markdown should use conversation title, got: %s", string(content))
+	}
+}
+
+func TestSplitChatGPTProjectAndTitle(t *testing.T) {
+	projectName, title := splitChatGPTProjectAndTitle("经典数学题100例 1 - 求圆的面积")
+	if projectName != "经典数学题100例 1" || title != "求圆的面积" {
+		t.Fatalf("unexpected split: project=%q title=%q", projectName, title)
+	}
+
+	projectName, title = splitChatGPTProjectAndTitle("求圆的面积")
+	if projectName != "" || title != "求圆的面积" {
+		t.Fatalf("unexpected plain title split: project=%q title=%q", projectName, title)
+	}
+}
+
 func TestRunProjectURLListExportContinuesAndDoesNotWritePlaceholderOnFailure(t *testing.T) {
 	outputDir := t.TempDir()
 	urlListPath := filepath.Join(t.TempDir(), "urls.txt")
@@ -1198,6 +1268,15 @@ func TestCDPExtractionScriptContainsTableSerialization(t *testing.T) {
 	}
 	if !strings.Contains(text, "map((tr) => Array.from(tr.querySelectorAll('th,td')).map((cell) => escapeCell(serializeFragment(cell))))") {
 		t.Fatalf("expected table cells to be serialized through the shared fragment serializer")
+	}
+	if !strings.Contains(text, "clone.querySelectorAll('h1,h2,h3,h4,h5,h6').forEach((el) =>") {
+		t.Fatalf("expected heading preservation in CDP extraction script")
+	}
+	if !strings.Contains(text, `" + "#".repeat(level) + " " + text + "`) {
+		t.Fatalf("expected headings to be converted to markdown headings")
+	}
+	if !strings.Contains(text, "clone.querySelectorAll('p').forEach((el) =>") {
+		t.Fatalf("expected paragraph preservation in CDP extraction script")
 	}
 }
 

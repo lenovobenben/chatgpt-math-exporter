@@ -141,6 +141,33 @@ func TestRenderConversationParsesCodeBlocksFromText(t *testing.T) {
 	}
 }
 
+func TestRenderConversationPreservesMarkdownHeadingsFromBrowserText(t *testing.T) {
+	conv := model.Conversation{
+		Title: "Heading Demo",
+		Messages: []model.Message{
+			{
+				Role: "assistant",
+				Content: strings.Join([]string{
+					"先说明。",
+					"",
+					"### 第一步：建立坐标系",
+					"",
+					"设 $x = 1$。",
+				}, "\n"),
+			},
+		},
+	}
+
+	got, warnings := RenderConversation(conv)
+
+	if len(warnings) != 0 {
+		t.Fatalf("unexpected warnings: %#v", warnings)
+	}
+	if !strings.Contains(got, "\n### 第一步：建立坐标系\n") {
+		t.Fatalf("expected markdown heading to survive rendering: %s", got)
+	}
+}
+
 func TestRenderConversationParsesImageMarkerIntoBlockAndRendersMarkerForRemoteAsset(t *testing.T) {
 	conv := model.Conversation{
 		Title: "Image Marker",

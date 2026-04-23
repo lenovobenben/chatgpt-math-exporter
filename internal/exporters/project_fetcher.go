@@ -22,6 +22,7 @@ type ProjectFetcher interface {
 
 type FetchedConversation struct {
 	ProjectName string
+	Title       string
 	Messages    []Message
 	Warnings    []warningRecord
 }
@@ -185,8 +186,10 @@ func (f *ChatGPTProjectFetcher) decodeConversationResponse(resp *http.Response) 
 		}
 	}
 
+	projectName, title := splitChatGPTProjectAndTitle(conv.Title)
 	return FetchedConversation{
-		ProjectName: firstNonEmpty(conv.Title, "chatgpt-project"),
+		ProjectName: firstNonEmpty(projectName, conv.Title, "chatgpt-project"),
+		Title:       firstNonEmpty(title, conv.Title, "Untitled Conversation"),
 		Messages:    conv.Messages,
 	}, nil
 }

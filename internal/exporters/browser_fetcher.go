@@ -166,8 +166,10 @@ func (f *CDPBrowserProjectFetcher) FetchConversation(ctx context.Context, info P
 		}
 	}
 
+	projectName, title := splitChatGPTProjectAndTitle(payload.Title)
 	return FetchedConversation{
-		ProjectName: firstNonEmpty(payload.Title, info.GPTSlug, "chatgpt-project"),
+		ProjectName: firstNonEmpty(projectName, info.GPTSlug, "chatgpt-project"),
+		Title:       firstNonEmpty(title, payload.Title, "Untitled Conversation"),
 		Messages:    messages,
 		Warnings:    appendSessionWarnings(warnings, launched),
 	}, nil
@@ -373,6 +375,20 @@ func runCDPDOMExtraction(ctx context.Context, port int, pageURL, cookieHeader st
         return;
       }
       el.remove();
+    });
+    clone.querySelectorAll('h1,h2,h3,h4,h5,h6').forEach((el) => {
+      const text = (el.innerText || el.textContent || '').trim();
+      if (!text) {
+        el.remove();
+        return;
+      }
+      const rawLevel = Number((el.tagName || 'H3').slice(1)) || 3;
+      const level = Math.min(rawLevel + 2, 6);
+      el.replaceWith(document.createTextNode("\n\n" + "#".repeat(level) + " " + text + "\n\n"));
+    });
+    clone.querySelectorAll('p').forEach((el) => {
+      const text = (el.innerText || el.textContent || '').trim();
+      el.replaceWith(document.createTextNode(text ? "\n\n" + text + "\n\n" : "\n\n"));
     });
     clone.querySelectorAll('svg, script, style').forEach((el) => el.remove());
     return (clone.innerText || '').trim();

@@ -462,12 +462,29 @@ func exportProjectURL(cfg config.Config, fetcher ProjectFetcher, rawURL string, 
 }
 
 func conversationFromFetched(urlInfo ProjectURLInfo, fetched FetchedConversation) Conversation {
-	title := firstNonEmpty(fetched.ProjectName, urlInfo.GPTSlug, "chatgpt-project")
+	title := firstNonEmpty(fetched.Title, fetched.ProjectName, urlInfo.GPTSlug, "Untitled Conversation")
 	return Conversation{
 		ID:       urlInfo.ConversationID,
 		Title:    title,
 		Messages: fetched.Messages,
 	}
+}
+
+func splitChatGPTProjectAndTitle(rawTitle string) (string, string) {
+	title := strings.TrimSpace(rawTitle)
+	if title == "" {
+		return "", ""
+	}
+	for _, sep := range []string{" - ", " ｜ ", " | "} {
+		if left, right, ok := strings.Cut(title, sep); ok {
+			left = strings.TrimSpace(left)
+			right = strings.TrimSpace(right)
+			if left != "" && right != "" {
+				return left, right
+			}
+		}
+	}
+	return "", title
 }
 
 func chooseProjectName(cfg config.Config, conversations []Conversation) string {
