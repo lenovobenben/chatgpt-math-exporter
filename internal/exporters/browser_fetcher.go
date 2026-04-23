@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	rendermarkdown "github.com/lihd/chatgpt-math-exporter/internal/render/markdown"
 )
 
 const chromeAppPath = "/Applications/Google Chrome.app"
@@ -199,7 +201,10 @@ func (f *CDPBrowserProjectFetcher) ensureSession(ctx context.Context) (int, bool
 		if f.launchErr != nil {
 			return 0, false, f.launchErr
 		}
-		f.sessionReady = false
+		return 0, false, &ProjectFetchError{
+			Code:    "source.project_url.browser_session_lost",
+			Message: "The reusable Chrome DevTools session was lost during this run. CGME will not relaunch Chrome automatically; keep one session alive and rerun.",
+		}
 	}
 
 	f.bootAttempted = true
@@ -311,9 +316,24 @@ func runCDPDOMExtraction(ctx context.Context, port int, pageURL, cookieHeader st
     const annotation = node.querySelector('annotation[encoding="application/x-tex"]');
     return annotation ? (annotation.textContent || '').trim() : '';
   };
-  const serializeNode = (node) => {
-    const clone = node.cloneNode(true);
-    const fence = String.fromCharCode(96, 96, 96);
+  const fence = String.fromCharCode(96, 96, 96);
+  const escapeCell = (text) => (text || '').replace(/\|/g, '\\|').replace(/\n/g, '<br>').trim();
+  const serializeFragment = (root) => {
+    const clone = root.cloneNode(true);
+    clone.querySelectorAll('pre').forEach((el) => {
+      const code = el.querySelector('code');
+      const text = ((code || el).innerText || '').replace(/\u00a0/g, ' ').trimEnd();
+      const className = (code && code.getAttribute('class')) || el.getAttribute('data-language') || '';
+      const match = className.match(/language-([a-z0-9_+-]+)/i);
+      const language = match ? match[1] : '';
+      const fenceText = "\n" + fence + language + "\n" + text + "\n" + fence + "\n";
+      el.replaceWith(document.createTextNode(fenceText));
+    });
+    clone.querySelectorAll('table').forEach((el) => {
+      const markdown = tableToMarkdown(el);
+      const replacement = document.createTextNode(markdown ? "\n" + markdown + "\n" : "\n");
+      el.replaceWith(replacement);
+    });
     clone.querySelectorAll('.katex-display').forEach((el) => {
       const tex = getKatexTex(el);
       const replacement = document.createTextNode(tex ? "\n" + fence + "math\n" + tex + "\n" + fence + "\n" : "\n");
@@ -349,6 +369,27 @@ func runCDPDOMExtraction(ctx context.Context, port int, pageURL, cookieHeader st
     });
     clone.querySelectorAll('svg, script, style').forEach((el) => el.remove());
     return (clone.innerText || '').trim();
+  };
+  const tableToMarkdown = (table) => {
+    const rows = Array.from(table.querySelectorAll('tr'))
+      .map((tr) => Array.from(tr.querySelectorAll('th,td')).map((cell) => escapeCell(serializeFragment(cell))))
+      .filter((row) => row.length > 0);
+    if (!rows.length) return '';
+    const headers = rows[0];
+    const body = rows.slice(1);
+    const lines = [];
+    lines.push('| ' + headers.join(' | ') + ' |');
+    lines.push('| ' + headers.map(() => '---').join(' | ') + ' |');
+    body.forEach((row) => {
+      const cells = row.slice();
+      while (cells.length < headers.length) cells.push('');
+      if (cells.length > headers.length) cells.length = headers.length;
+      lines.push('| ' + cells.join(' | ') + ' |');
+    });
+    return lines.join('\n');
+  };
+  const serializeNode = (node) => {
+    return serializeFragment(node);
   };
   const roleNodes = Array.from(document.querySelectorAll('[data-message-author-role]'));
   const messages = roleNodes
@@ -719,10 +760,15 @@ func normalizeBrowserMessages(messages []Message) ([]Message, []warningRecord) {
 		}
 		if len(out) > 0 && out[len(out)-1].Role == role {
 			out[len(out)-1].Content = strings.TrimSpace(out[len(out)-1].Content + "\n\n" + content)
+			out[len(out)-1].Blocks = rendermarkdown.ParseTextBlocks(out[len(out)-1].Content)
 			mergedCount++
 			continue
 		}
-		out = append(out, Message{Role: role, Content: content})
+		out = append(out, Message{
+			Role:    role,
+			Content: content,
+			Blocks:  rendermarkdown.ParseTextBlocks(content),
+		})
 	}
 	warnings := make([]warningRecord, 0, 2)
 	if filteredNoiseCount > 0 {

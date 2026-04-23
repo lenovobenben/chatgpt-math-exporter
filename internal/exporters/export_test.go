@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/lihd/chatgpt-math-exporter/internal/config"
+	"github.com/lihd/chatgpt-math-exporter/internal/model"
 )
 
 func TestRunBundleExport(t *testing.T) {
@@ -1101,6 +1102,26 @@ func TestParseBrowserConversationPayload(t *testing.T) {
 	}
 }
 
+func TestCDPExtractionScriptContainsTableSerialization(t *testing.T) {
+	src, err := os.ReadFile("browser_fetcher.go")
+	if err != nil {
+		t.Fatalf("read browser_fetcher.go: %v", err)
+	}
+	text := string(src)
+	if !strings.Contains(text, "const tableToMarkdown = (table) =>") {
+		t.Fatalf("expected table serialization helper in CDP extraction script")
+	}
+	if !strings.Contains(text, "clone.querySelectorAll('pre').forEach((el) => {") {
+		t.Fatalf("expected pre/code block preservation in CDP extraction script")
+	}
+	if !strings.Contains(text, "clone.querySelectorAll('table').forEach((el) =>") {
+		t.Fatalf("expected table replacement in CDP extraction script")
+	}
+	if !strings.Contains(text, "map((tr) => Array.from(tr.querySelectorAll('th,td')).map((cell) => escapeCell(serializeFragment(cell))))") {
+		t.Fatalf("expected table cells to be serialized through the shared fragment serializer")
+	}
+}
+
 func TestEnsureBrowserProfileRoot(t *testing.T) {
 	root, err := ensureBrowserProfileRoot(filepath.Join(t.TempDir(), "browser-profile"))
 	if err != nil {
@@ -1139,8 +1160,43 @@ func TestNormalizeBrowserMessages(t *testing.T) {
 	if got[1].Role != "assistant" || got[1].Content != "Result\n\nx = 1" {
 		t.Fatalf("unexpected second normalized message: %#v", got[1])
 	}
+	if len(got[0].Blocks) != 2 || got[0].Blocks[0].Kind != model.BlockParagraph || got[0].Blocks[1].Kind != model.BlockParagraph {
+		t.Fatalf("expected user content to be parsed into paragraph blocks, got %#v", got[0].Blocks)
+	}
+	if len(got[1].Blocks) != 2 || got[1].Blocks[0].Kind != model.BlockParagraph || got[1].Blocks[1].Kind != model.BlockParagraph {
+		t.Fatalf("expected merged assistant content to be parsed into paragraph blocks, got %#v", got[1].Blocks)
+	}
 	if len(warnings) != 3 {
 		t.Fatalf("expected normalization warnings, got %#v", warnings)
+	}
+}
+
+func TestNormalizeBrowserMessagesParsesStructuredBlocks(t *testing.T) {
+	got, _ := normalizeBrowserMessages([]Message{
+		{
+			Role: "assistant",
+			Content: strings.Join([]string{
+				"我先给一个表格：",
+				"",
+				"| n | phi(n) |",
+				"| --- | --- |",
+				"| 5 | 4 |",
+				"",
+				"```math",
+				`(\mathbb{Z}/5\mathbb{Z})^\times \cong C_4`,
+				"```",
+			}, "\n"),
+		},
+	})
+
+	if len(got) != 1 {
+		t.Fatalf("expected one message, got %#v", got)
+	}
+	if len(got[0].Blocks) != 3 {
+		t.Fatalf("expected paragraph + table + math blocks, got %#v", got[0].Blocks)
+	}
+	if got[0].Blocks[0].Kind != model.BlockParagraph || got[0].Blocks[1].Kind != model.BlockTable || got[0].Blocks[2].Kind != model.BlockMath {
+		t.Fatalf("unexpected block kinds: %#v", got[0].Blocks)
 	}
 }
 
@@ -1236,7 +1292,7 @@ func TestBrowserFetcherDoesNotRelaunchAfterStartupFailure(t *testing.T) {
 	}
 }
 
-func TestBrowserFetcherRelaunchesAfterSessionLoss(t *testing.T) {
+func TestBrowserFetcherDoesNotRelaunchAfterSessionLoss(t *testing.T) {
 	origEnsureProfile := ensureBrowserProfile
 	origEnsureSession := ensureChromeSession
 	origRunCDP := runCDPExtraction
@@ -1285,12 +1341,12 @@ func TestBrowserFetcherRelaunchesAfterSessionLoss(t *testing.T) {
 		Host:           "chatgpt.com",
 		ConversationID: "conv-2",
 	})
-	if err != nil {
-		t.Fatalf("recovery fetch error = %v", err)
+	if err == nil || !strings.Contains(err.Error(), "browser_session_lost") {
+		t.Fatalf("expected session_lost error, got %v", err)
 	}
 
-	if launchCalls != 2 {
-		t.Fatalf("expected relaunch after session loss, got %d launch attempt(s)", launchCalls)
+	if launchCalls != 1 {
+		t.Fatalf("expected no relaunch after session loss, got %d launch attempt(s)", launchCalls)
 	}
 }
 

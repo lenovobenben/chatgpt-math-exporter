@@ -10,19 +10,6 @@ import (
 	"strings"
 )
 
-type Conversation struct {
-	ID       string
-	Title    string
-	CreateAt float64
-	Messages []Message
-}
-
-type Message struct {
-	ID      string
-	Role    string
-	Content string
-}
-
 type rawConversation struct {
 	ID         string             `json:"id"`
 	Title      string             `json:"title"`
