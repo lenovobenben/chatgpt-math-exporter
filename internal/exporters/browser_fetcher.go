@@ -197,6 +197,11 @@ func (f *CDPBrowserProjectFetcher) ensureSession(ctx context.Context) (int, bool
 	if f.sessionReady && cdpReady(ctx, f.debugPort) {
 		return f.debugPort, false, nil
 	}
+	if f.sessionReady {
+		if err := waitForCDPReady(ctx, f.debugPort, 2*time.Second); err == nil {
+			return f.debugPort, false, nil
+		}
+	}
 	if f.bootAttempted {
 		if f.launchErr != nil {
 			return 0, false, f.launchErr
@@ -257,7 +262,9 @@ func ensureChromeDebuggingSession(ctx context.Context, chromePath, profileRoot s
 	if cdpReady(ctx, port) {
 		return port, false, nil
 	}
-	cmd := exec.CommandContext(ctx, filepath.Join(chromePath, "Contents", "MacOS", "Google Chrome"),
+	// Keep the debugging Chrome process independent from per-conversation timeout contexts.
+	// Otherwise it gets terminated as soon as one URL fetch context is canceled.
+	cmd := exec.Command(filepath.Join(chromePath, "Contents", "MacOS", "Google Chrome"),
 		fmt.Sprintf("--remote-debugging-port=%d", port),
 		"--user-data-dir="+profileRoot,
 		"--profile-directory=Default",

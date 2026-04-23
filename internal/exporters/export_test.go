@@ -836,6 +836,85 @@ func TestRunProjectURLListExportContinuesAfterPerURLTimeout(t *testing.T) {
 	}
 }
 
+func TestRunProjectURLListExportStopsAfterBrowserSessionLost(t *testing.T) {
+	outputDir := t.TempDir()
+	urlListPath := filepath.Join(t.TempDir(), "urls.txt")
+	if err := os.WriteFile(urlListPath, []byte(strings.Join([]string{
+		"https://chatgpt.com/g/g-p-1/c/conv-1",
+		"https://chatgpt.com/g/g-p-1/c/conv-2",
+		"https://chatgpt.com/g/g-p-1/c/conv-3",
+	}, "\n")), 0o644); err != nil {
+		t.Fatalf("write url list: %v", err)
+	}
+
+	originalFactory := projectFetcherFactory
+	projectFetcherFactory = func(cfg config.Config) ProjectFetcher {
+		return routedStubProjectFetcher{
+			routes: map[string]FetchedConversation{
+				"conv-1": {
+					ProjectName: "Problem One",
+					Messages: []Message{
+						{Role: "user", Content: "Question 1"},
+						{Role: "assistant", Content: "Answer 1"},
+					},
+				},
+			},
+			errByConversation: map[string]error{
+				"conv-2": &ProjectFetchError{
+					Code:    "source.project_url.browser_session_lost",
+					Message: "session lost in test",
+				},
+			},
+		}
+	}
+	defer func() {
+		projectFetcherFactory = originalFactory
+	}()
+
+	cfg := config.Config{
+		Source: config.SourceConfig{
+			Type:    "project_url_list",
+			URLList: urlListPath,
+		},
+		Output: config.OutputConfig{
+			Dir:       outputDir,
+			AssetsDir: filepath.Join(outputDir, "assets"),
+		},
+		Options: config.OptionConfig{
+			WriteReadme:   true,
+			WriteWarnings: true,
+			PreserveLinks: true,
+		},
+	}
+
+	if err := Run(cfg); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	reportContent, err := os.ReadFile(filepath.Join(outputDir, "export-report.json"))
+	if err != nil {
+		t.Fatalf("read export report: %v", err)
+	}
+	var report batchExportReport
+	if err := json.Unmarshal(reportContent, &report); err != nil {
+		t.Fatalf("unmarshal export report: %v", err)
+	}
+	if report.Summary.Success != 1 || report.Summary.Failed != 1 {
+		t.Fatalf("unexpected report summary: %#v", report.Summary)
+	}
+	if report.Summary.Total != 2 {
+		t.Fatalf("expected batch to stop after session_lost, total processed=%d", report.Summary.Total)
+	}
+
+	warningsContent, err := os.ReadFile(filepath.Join(outputDir, "warnings.json"))
+	if err != nil {
+		t.Fatalf("read warnings: %v", err)
+	}
+	if !strings.Contains(string(warningsContent), "source.project_url_list.aborted_session_lost") {
+		t.Fatalf("expected abort warning for session loss, got: %s", string(warningsContent))
+	}
+}
+
 func TestRunProjectURLListExportSkipsCompletedEntriesByDefault(t *testing.T) {
 	outputDir := t.TempDir()
 	urlListPath := filepath.Join(t.TempDir(), "urls.txt")

@@ -217,6 +217,13 @@ func runProjectURLListExport(cfg config.Config) error {
 			if err := writeBatchExportReport(reportPath, report); err != nil {
 				return err
 			}
+			if isBrowserSessionLostError(err) {
+				allWarnings = append(allWarnings, warningRecord{
+					Code:    "source.project_url_list.aborted_session_lost",
+					Message: fmt.Sprintf("Aborted batch at line %d because the reusable browser session was lost; rerun after stabilizing the Chrome DevTools session.", i+1),
+				})
+				break
+			}
 			continue
 		}
 
@@ -256,6 +263,20 @@ func runProjectURLListExport(cfg config.Config) error {
 	}
 
 	return nil
+}
+
+func isBrowserSessionLostError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if strings.Contains(err.Error(), "source.project_url.browser_session_lost") {
+		return true
+	}
+	var fetchErr *ProjectFetchError
+	if errors.As(err, &fetchErr) {
+		return fetchErr.Code == "source.project_url.browser_session_lost"
+	}
+	return false
 }
 
 type projectURLExportResult struct {
