@@ -223,6 +223,7 @@ var (
 	standaloneInlineMathLine = regexp.MustCompile(`^\$(.+)\$[ \t]*[。．.]?$`)
 	labelInlineMathLine      = regexp.MustCompile(`^(.+?[：:])[ \t]*\$(.+)\$[ \t]*$`)
 	imageMarkerLine          = regexp.MustCompile(`^\[\[CGME_IMAGE:(\{.*\})\]\]$`)
+	trailingMathTagLine      = regexp.MustCompile(`(?s)^(.+?)\s*\\tag\{([^{}]+)\}\s*$`)
 )
 
 func splitParagraphBlocks(text string) []model.Block {
@@ -363,6 +364,9 @@ func renderBlock(block model.Block) (string, []Warning) {
 		if text == "" {
 			return "", nil
 		}
+		if body, tag, ok := splitTrailingMathTag(text); ok {
+			return formatMathTagLabel(tag) + "\n\n```math\n" + body + "\n```", nil
+		}
 		return "```math\n" + text + "\n```", nil
 	case model.BlockImage:
 		if block.Image == nil {
@@ -404,6 +408,26 @@ func renderBlock(block model.Block) (string, []Warning) {
 	default:
 		return NormalizeMathText(block.Text, NormalizeOptions{})
 	}
+}
+
+func splitTrailingMathTag(input string) (string, string, bool) {
+	matches := trailingMathTagLine.FindStringSubmatch(strings.TrimSpace(input))
+	if len(matches) != 3 {
+		return "", "", false
+	}
+	body := strings.TrimSpace(matches[1])
+	tag := strings.TrimSpace(matches[2])
+	if body == "" || tag == "" {
+		return "", "", false
+	}
+	return body, tag, true
+}
+
+func formatMathTagLabel(tag string) string {
+	if strings.HasPrefix(tag, "(") && strings.HasSuffix(tag, ")") {
+		return tag
+	}
+	return "(" + tag + ")"
 }
 
 func renderTable(table *model.Table) string {

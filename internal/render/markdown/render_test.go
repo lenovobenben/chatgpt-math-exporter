@@ -168,6 +168,32 @@ func TestRenderConversationPreservesMarkdownHeadingsFromBrowserText(t *testing.T
 	}
 }
 
+func TestRenderConversationRewritesTrailingMathTagForGitHubCompatibility(t *testing.T) {
+	conv := model.Conversation{
+		Title: "Math Tag Demo",
+		Messages: []model.Message{
+			{
+				Role: "assistant",
+				Blocks: []model.Block{
+					{Kind: model.BlockMath, Text: `a_1 b_1 = a_2 b_2. \tag{4}`},
+				},
+			},
+		},
+	}
+
+	got, warnings := RenderConversation(conv)
+
+	if len(warnings) != 0 {
+		t.Fatalf("unexpected warnings: %#v", warnings)
+	}
+	if !strings.Contains(got, "\n(4)\n\n```math\na_1 b_1 = a_2 b_2.\n```") {
+		t.Fatalf("expected trailing math tag to be rewritten into a standalone label: %s", got)
+	}
+	if strings.Contains(got, `\tag{4}`) {
+		t.Fatalf("expected raw \\tag to be removed for markdown output: %s", got)
+	}
+}
+
 func TestRenderConversationParsesImageMarkerIntoBlockAndRendersMarkerForRemoteAsset(t *testing.T) {
 	conv := model.Conversation{
 		Title: "Image Marker",
