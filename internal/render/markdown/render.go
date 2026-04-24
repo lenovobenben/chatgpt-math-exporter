@@ -431,8 +431,8 @@ func formatMathTagLabel(tag string) string {
 }
 
 func renderTable(table *model.Table) string {
-	if shouldRenderTableAsStructuredRows(table) {
-		return renderStructuredTableRows(table)
+	if shouldRenderTableWithMathDetails(table) {
+		return renderTableWithMathDetails(table)
 	}
 	headers := normalizeTableRow(table.Headers)
 	if len(headers) == 0 {
@@ -472,9 +472,7 @@ func normalizeTableRow(cells []string) []string {
 	}
 	out := make([]string, 0, len(cells))
 	for _, cell := range cells {
-		clean := normalizeTableCell(cell)
-		clean = strings.ReplaceAll(clean, "\n", "<br>")
-		clean = strings.ReplaceAll(clean, "|", `\|`)
+		clean := escapeMarkdownTableCell(normalizeTableCell(cell))
 		out = append(out, clean)
 	}
 	return out
@@ -486,7 +484,7 @@ func normalizeTableCell(cell string) string {
 	return strings.TrimSpace(normalized)
 }
 
-func shouldRenderTableAsStructuredRows(table *model.Table) bool {
+func shouldRenderTableWithMathDetails(table *model.Table) bool {
 	if table == nil {
 		return false
 	}
@@ -519,45 +517,79 @@ func tableCellNeedsStructuredRender(cell string) bool {
 	return false
 }
 
-func renderStructuredTableRows(table *model.Table) string {
+func renderTableWithMathDetails(table *model.Table) string {
 	headers := normalizeTableRow(table.Headers)
 	if len(headers) == 0 {
 		return ""
 	}
 
-	sections := make([]string, 0, len(table.Rows))
-	for i, row := range table.Rows {
-		parts := []string{fmt.Sprintf("##### Row %d", i+1)}
-		for j, header := range headers {
+	var tableBuilder strings.Builder
+	tableBuilder.WriteString("| ")
+	tableBuilder.WriteString(strings.Join(headers, " | "))
+	tableBuilder.WriteString(" |\n| ")
+	separators := make([]string, len(headers))
+	for i := range separators {
+		separators[i] = "---"
+	}
+	tableBuilder.WriteString(strings.Join(separators, " | "))
+	tableBuilder.WriteString(" |")
+
+	details := make([]string, 0)
+	refIndex := 1
+	for rowIndex, row := range table.Rows {
+		cells := make([]string, 0, len(headers))
+		for colIndex, header := range headers {
 			cell := ""
-			if j < len(row) {
-				cell = strings.TrimSpace(row[j])
+			if colIndex < len(row) {
+				cell = strings.TrimSpace(row[colIndex])
 			}
-			rendered := renderStructuredTableCell(cell)
-			if rendered == "" {
+			if body, ok := extractStructuredMathBody(cell); ok {
+				label := fmt.Sprintf("见公式%d", refIndex)
+				cells = append(cells, label)
+				details = append(details, strings.Join([]string{
+					fmt.Sprintf("##### 公式%d（Row %d %s）", refIndex, rowIndex+1, header),
+					"```math\n" + body + "\n```",
+				}, "\n\n"))
+				refIndex++
 				continue
 			}
-			parts = append(parts, header)
-			parts = append(parts, rendered)
+			cells = append(cells, escapeMarkdownTableCell(normalizeTableCell(cell)))
 		}
-		sections = append(sections, strings.Join(parts, "\n\n"))
+		for len(cells) < len(headers) {
+			cells = append(cells, "")
+		}
+		if len(cells) > len(headers) {
+			cells = cells[:len(headers)]
+		}
+		tableBuilder.WriteString("\n| ")
+		tableBuilder.WriteString(strings.Join(cells, " | "))
+		tableBuilder.WriteString(" |")
 	}
-	return strings.Join(sections, "\n\n")
+
+	if len(details) == 0 {
+		return tableBuilder.String()
+	}
+	return tableBuilder.String() + "\n\n" + strings.Join(details, "\n\n")
 }
 
-func renderStructuredTableCell(cell string) string {
+func extractStructuredMathBody(cell string) (string, bool) {
 	trimmed := strings.TrimSpace(cell)
 	if trimmed == "" {
-		return ""
+		return "", false
 	}
 	if strings.HasPrefix(trimmed, "$") && strings.HasSuffix(trimmed, "$") {
 		body := strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(trimmed, "$"), "$"))
 		if body != "" && (strings.Contains(body, `\begin{`) || strings.Contains(body, `\\`)) {
-			return "```math\n" + body + "\n```"
+			return body, true
 		}
 	}
-	normalized := normalizeTableCell(trimmed)
-	return normalized
+	return "", false
+}
+
+func escapeMarkdownTableCell(cell string) string {
+	clean := strings.ReplaceAll(cell, "\n", "<br>")
+	clean = strings.ReplaceAll(clean, "|", `\|`)
+	return clean
 }
 
 func escapeImageAlt(alt string) string {

@@ -114,7 +114,7 @@ func TestRenderConversationParsesTableAndMathBlocksFromText(t *testing.T) {
 	}
 }
 
-func TestRenderConversationRendersComplexMathTableAsStructuredRows(t *testing.T) {
+func TestRenderConversationRendersComplexMathTableWithDetails(t *testing.T) {
 	conv := model.Conversation{
 		Title: "Math Table",
 		Messages: []model.Message{
@@ -140,17 +140,17 @@ func TestRenderConversationRendersComplexMathTableAsStructuredRows(t *testing.T)
 	if len(warnings) != 0 {
 		t.Fatalf("unexpected warnings: %#v", warnings)
 	}
-	if strings.Contains(got, "| 方程组 | 最小整数解 |") {
-		t.Fatalf("expected complex math table to avoid markdown table rendering: %s", got)
+	if !strings.Contains(got, "| 方程组 | 最小整数解 |") {
+		t.Fatalf("expected table structure to remain: %s", got)
 	}
-	if !strings.Contains(got, "##### Row 1") {
-		t.Fatalf("expected structured row heading: %s", got)
+	if !strings.Contains(got, "| 见公式1 | $[-1, 1, 1]$ |") {
+		t.Fatalf("expected math-heavy cell to be replaced by a table reference: %s", got)
 	}
-	if !strings.Contains(got, "方程组\n\n```math\n\\begin{cases} x + 2y - z = 0 \\\\ 3x - y + 4z = 0 \\end{cases}\n```") {
-		t.Fatalf("expected math-heavy cell to render as fenced math block: %s", got)
+	if !strings.Contains(got, "##### 公式1（Row 1 方程组）") {
+		t.Fatalf("expected formula appendix heading: %s", got)
 	}
-	if !strings.Contains(got, "最小整数解\n\n$[-1, 1, 1]$") {
-		t.Fatalf("expected non-math summary cell to remain inline text: %s", got)
+	if !strings.Contains(got, "```math\n\\begin{cases} x + 2y - z = 0 \\\\ 3x - y + 4z = 0 \\end{cases}\n```") {
+		t.Fatalf("expected math-heavy cell to render in appendix as fenced math block: %s", got)
 	}
 }
 
