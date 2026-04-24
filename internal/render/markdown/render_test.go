@@ -584,3 +584,20 @@ func TestRenderConversationRewritesRawAngleBracketsInMath(t *testing.T) {
 		t.Fatalf("expected $d\\gt{}0$ in output: %s", got2)
 	}
 }
+
+func TestRenderConversationDoesNotRewriteAngleBracketsInPlainText(t *testing.T) {
+	conv := model.Conversation{
+		Title: "Plain Text GT Demo",
+		Messages: []model.Message{
+			{Role: "assistant", Content: `Magma can handle degree > 50 polynomials.`},
+		},
+	}
+
+	got, _ := RenderConversation(conv)
+	if strings.Contains(got, `\gt{}`) {
+		t.Fatalf("expected plain text > to NOT be replaced with \\gt{}: %s", got)
+	}
+	if !strings.Contains(got, "degree > 50") {
+		t.Fatalf("expected plain text > to remain as-is: %s", got)
+	}
+}

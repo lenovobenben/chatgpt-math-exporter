@@ -79,6 +79,7 @@ func normalizeInlineCodeFreeText(line string, warnings []Warning) (string, []War
 		inner := match[1 : len(match)-1]
 		inner = strings.ReplaceAll(inner, `\{`, `\lbrace `)
 		inner = strings.ReplaceAll(inner, `\}`, `\rbrace `)
+		inner = rewriteAngleBrackets(inner)
 		return "$" + inner + "$"
 	})
 	return joined, warnings
@@ -184,25 +185,27 @@ func replaceMathSymbols(input string) (string, int) {
 	}
 	replaced := mathSymbolReplacer.Replace(input)
 	replaced = rewriteOperatorname(replaced)
-	// Replace raw < and > with \lt / \gt to prevent GitHub's Markdown
-	// parser from HTML-encoding them as &lt; / &gt;, which breaks MathJax.
-	// Use \lt{} / \gt{} to ensure trailing letters aren't consumed as
-	// part of the command name (e.g. \ltj → \lt{}j, not \ltj).
-	if strings.Contains(replaced, "<") {
-		count += strings.Count(replaced, "<")
-		replaced = bareLTPattern.ReplaceAllString(replaced, `\lt{}`)
-	}
-	if strings.Contains(replaced, ">") {
-		count += strings.Count(replaced, ">")
-		replaced = bareGTPattern.ReplaceAllString(replaced, `\gt{}`)
-	}
 	return replaced, count
 }
 
+// rewriteAngleBrackets replaces raw < and > with \lt{} / \gt{}.
+// Only safe to call on pure math expressions or inside $...$ inline math.
+// Must NOT be called on paragraph text where > may be plain English.
+func rewriteAngleBrackets(input string) string {
+	if strings.Contains(input, "<") {
+		input = bareLTPattern.ReplaceAllString(input, `\lt{}`)
+	}
+	if strings.Contains(input, ">") {
+		input = bareGTPattern.ReplaceAllString(input, `\gt{}`)
+	}
+	return input
+}
+
 // NormalizeMathExpression applies math-level normalization (symbol replacement,
-// operatorname rewrite) to a pure math expression. This is format-agnostic and
-// should be called by any renderer before emitting math content.
+// operatorname rewrite, angle bracket rewrite) to a pure math expression.
+// This is format-agnostic and should be called by any renderer before emitting math content.
 func NormalizeMathExpression(text string) string {
 	result, _ := replaceMathSymbols(text)
+	result = rewriteAngleBrackets(result)
 	return result
 }
