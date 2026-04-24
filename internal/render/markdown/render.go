@@ -205,6 +205,29 @@ func ParseTextBlocks(content string) []model.Block {
 			continue
 		}
 
+		if trimmed == `\[` {
+			flushParagraph()
+			i++
+			mathLines := make([]string, 0)
+			// Collect lines until a standalone \]
+			for i < len(lines) && strings.TrimSpace(lines[i]) != `\]` {
+				mathLines = append(mathLines, strings.TrimRight(lines[i], " \t"))
+				i++
+			}
+			if i < len(lines) && strings.TrimSpace(lines[i]) == `\]` {
+				i++
+			}
+			text := strings.TrimSpace(strings.Join(mathLines, "\n"))
+			if text != "" {
+				blocks = append(blocks, model.Block{Kind: model.BlockMath, Text: text})
+			}
+			continue
+		}
+		if trimmed == `\]` {
+			i++
+			continue
+		}
+
 		if trimmed == "" {
 			flushParagraph()
 			i++
@@ -370,7 +393,7 @@ func parseMarkdownTableLine(line string) []string {
 func renderBlock(block model.Block) (string, []Warning) {
 	switch block.Kind {
 	case model.BlockMath:
-		text := strings.TrimSpace(block.Text)
+		text := NormalizeMathExpression(strings.TrimSpace(block.Text))
 		if text == "" {
 			return "", nil
 		}
@@ -558,7 +581,7 @@ func renderTableWithMathDetails(table *model.Table) string {
 				cells = append(cells, label)
 				details = append(details, strings.Join([]string{
 					fmt.Sprintf("##### 公式%d（Row %d %s）", refIndex, rowIndex+1, header),
-					"```math\n" + body + "\n```",
+					"```math\n" + NormalizeMathExpression(body) + "\n```",
 				}, "\n\n"))
 				refIndex++
 				continue

@@ -370,11 +370,61 @@ func TestRenderConversationRewritesAllowedSpecialFunctionNamesAwayFromOperatorna
 	if len(warnings) != 0 {
 		t.Fatalf("unexpected warnings: %#v", warnings)
 	}
-	if strings.Contains(got, `\operatorname{erf}`) || strings.Contains(got, `\operatorname{Si}`) || strings.Contains(got, `\operatorname{erfi}`) {
-		t.Fatalf("expected known special functions to be rewritten away from operatorname: %s", got)
+	if strings.Contains(got, `\operatorname`) {
+		t.Fatalf("expected all operatorname to be rewritten: %s", got)
 	}
 	if !strings.Contains(got, `\mathrm{erf}(x)`) || !strings.Contains(got, `\mathrm{Si}(x)`) || !strings.Contains(got, `\mathrm{erfi}(x)=-i\mathrm{erf}(ix)`) {
 		t.Fatalf("expected known special functions to use \\mathrm instead: %s", got)
+	}
+}
+
+func TestRenderConversationRewritesOperatornameInMathBlocks(t *testing.T) {
+	conv := model.Conversation{
+		Title: "Math Block Operatorname",
+		Messages: []model.Message{
+			{
+				Role: "assistant",
+				Blocks: []model.Block{
+					{Kind: model.BlockMath, Text: `y(x) = \operatorname{erf}^{-1}(x)`},
+				},
+			},
+		},
+	}
+
+	got, warnings := RenderConversation(conv)
+
+	if len(warnings) != 0 {
+		t.Fatalf("unexpected warnings: %#v", warnings)
+	}
+	if strings.Contains(got, `\operatorname`) {
+		t.Fatalf("expected operatorname to be rewritten in math block: %s", got)
+	}
+	if !strings.Contains(got, `\mathrm{erf}^{-1}(x)`) {
+		t.Fatalf("expected math block to use \\mathrm: %s", got)
+	}
+}
+
+func TestRenderConversationRewritesUnknownOperatornameInParagraphs(t *testing.T) {
+	conv := model.Conversation{
+		Title: "Unknown Operatorname",
+		Messages: []model.Message{
+			{
+				Role: "assistant",
+				Content: `符号函数 $\operatorname{sgn}(x)$ 和 Bessel 函数 $\operatorname{BesselJ}_n(x)$。`,
+			},
+		},
+	}
+
+	got, warnings := RenderConversation(conv)
+
+	if len(warnings) != 0 {
+		t.Fatalf("unexpected warnings: %#v", warnings)
+	}
+	if strings.Contains(got, `\operatorname`) {
+		t.Fatalf("expected all operatorname to be rewritten even for unknown names: %s", got)
+	}
+	if !strings.Contains(got, `\mathrm{sgn}(x)`) || !strings.Contains(got, `\mathrm{BesselJ}_n(x)`) {
+		t.Fatalf("expected unknown operatorname to use \\mathrm: %s", got)
 	}
 }
 
@@ -410,5 +460,127 @@ func TestRenderConversationRewritesSpecialFunctionNamesInsideTableCells(t *testi
 	}
 	if !strings.Contains(got, `\mathrm{erf}(x)`) || !strings.Contains(got, `\mathrm{Si}(x)`) {
 		t.Fatalf("expected table cells to use \\mathrm for known special functions: %s", got)
+	}
+}
+
+func TestRenderConversationStripsStandaloneDisplayMathBrackets(t *testing.T) {
+	conv := model.Conversation{
+		Title: "Bracket Demo",
+		Messages: []model.Message{
+			{
+				Role: "assistant",
+				Content: strings.Join([]string{
+					"已知条件，且",
+					"\\[",
+					"```math",
+					"a + b + c + d = 6",
+					"```",
+					"\\]",
+					"证明结论。",
+				}, "\n"),
+			},
+		},
+	}
+
+	got, _ := RenderConversation(conv)
+	if strings.Contains(got, "\\[\n") || strings.Contains(got, "\\]\n") {
+		t.Fatalf("expected standalone \\[ and \\] to be stripped: %s", got)
+	}
+}
+
+func TestRenderConversationConvertsDisplayMathBracketBlockToMathFence(t *testing.T) {
+	conv := model.Conversation{
+		Title: "Bracket Block Demo",
+		Messages: []model.Message{
+			{
+				Role: "assistant",
+				Content: strings.Join([]string{
+					"证明：",
+					"\\[",
+					"(a - b)(a - c) \\leq 27.",
+					"\\]",
+					"结论。",
+				}, "\n"),
+			},
+		},
+	}
+
+	got, _ := RenderConversation(conv)
+	if strings.Contains(got, "\\[") || strings.Contains(got, "\\]") {
+		t.Fatalf("expected \\[ and \\] to be removed: %s", got)
+	}
+	if !strings.Contains(got, "```math\n(a - b)(a - c) \\leq 27.\n```") {
+		t.Fatalf("expected display math block to become math fence: %s", got)
+	}
+}
+
+func TestRenderConversationStripsInlineDisplayMathBrackets(t *testing.T) {
+	content := "结论是 \\[x^2 + y^2 = z^2\\] 成立。"
+	conv := model.Conversation{
+		Title: "Inline Bracket Demo",
+		Messages: []model.Message{
+			{
+				Role:    "assistant",
+				Content: content,
+			},
+		},
+	}
+
+	got, _ := RenderConversation(conv)
+	if strings.Contains(got, `\[`) || strings.Contains(got, `\]`) {
+		t.Fatalf("expected inline \\[ and \\] to be stripped: %s", got)
+	}
+	if !strings.Contains(got, "x^2 + y^2 = z^2") {
+		t.Fatalf("expected math content to remain: %s", got)
+	}
+}
+
+func TestRenderConversationRewritesLiteralBracesInInlineMath(t *testing.T) {
+	conv := model.Conversation{
+		Title: "Literal Brace Demo",
+		Messages: []model.Message{
+			{
+				Role:    "assistant",
+				Content: "令 $d=\\min\\{a,b,c,d\\}$。结论成立。",
+			},
+		},
+	}
+
+	got, _ := RenderConversation(conv)
+	if strings.Contains(got, `\{`) || strings.Contains(got, `\}`) {
+		t.Fatalf("expected \\{ and \\} to be rewritten in inline math: %s", got)
+	}
+	if !strings.Contains(got, `\lbrace`) || !strings.Contains(got, `\rbrace`) {
+		t.Fatalf("expected \\lbrace/\\rbrace in inline math: %s", got)
+	}
+}
+
+func TestRenderConversationRewritesRawAngleBracketsInMath(t *testing.T) {
+	conv := model.Conversation{
+		Title: "Angle Bracket Demo",
+		Messages: []model.Message{
+			{
+				Role: "assistant",
+				Blocks: []model.Block{
+					{Kind: model.BlockMath, Text: `\Delta = \prod_{1\le i<j\le3}(r_i-r_j)^2`},
+				},
+			},
+		},
+	}
+
+	got, _ := RenderConversation(conv)
+	if !strings.Contains(got, `\lt{}j`) {
+		t.Fatalf("expected \\lt{}j in math block: %s", got)
+	}
+
+	conv2 := model.Conversation{
+		Title: "GT Demo",
+		Messages: []model.Message{
+			{Role: "assistant", Content: `当 $d>0$ 时 $x,y,z>0$ 成立。`},
+		},
+	}
+	got2, _ := RenderConversation(conv2)
+	if !strings.Contains(got2, `$d\gt{}0$`) {
+		t.Fatalf("expected $d\\gt{}0$ in output: %s", got2)
 	}
 }

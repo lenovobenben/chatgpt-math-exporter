@@ -20,15 +20,16 @@ var mathSymbolReplacer = strings.NewReplacer(
 	"÷", `\div`,
 )
 
-var specialFunctionOperatorReplacer = strings.NewReplacer(
-	`\operatorname{erf}`, `\mathrm{erf}`,
-	`\operatorname{erfi}`, `\mathrm{erfi}`,
-	`\operatorname{erfc}`, `\mathrm{erfc}`,
-	`\operatorname{Si}`, `\mathrm{Si}`,
-	`\operatorname{Ci}`, `\mathrm{Ci}`,
-	`\operatorname{Li}`, `\mathrm{Li}`,
-	`\operatorname{Ei}`, `\mathrm{Ei}`,
-)
+// bareLT/GT patterns: replace raw < and > with \lt / \gt, adding a space
+// if needed to prevent \ltxyz being parsed as a single command.
+var bareLTPattern = regexp.MustCompile(`<`)
+var bareGTPattern = regexp.MustCompile(`>`)
+
+var operatornamePattern = regexp.MustCompile(`\\operatorname\{([^{}]+)\}`)
+
+func rewriteOperatorname(input string) string {
+	return operatornamePattern.ReplaceAllString(input, `\mathrm{$1}`)
+}
 
 func NormalizeMathText(input string, opts NormalizeOptions) (string, []Warning) {
 	lines := strings.Split(input, "\n")
@@ -50,6 +51,11 @@ func NormalizeMathText(input string, opts NormalizeOptions) (string, []Warning) 
 	return wrapStandaloneMathBlocks(lines, warnings)
 }
 
+var displayMathBracketPattern = regexp.MustCompile(`\\\[((?:[^\\]|\\[^\]])*?)\\\]`)
+
+// inlineMathPattern matches $...$ inline math (no nesting, no $ inside).
+var inlineMathPattern = regexp.MustCompile(`\$([^\$]+)\$`)
+
 func normalizeInlineCodeFreeText(line string, warnings []Warning) (string, []Warning) {
 	parts := strings.Split(line, "`")
 	for i := 0; i < len(parts); i += 2 {
@@ -62,7 +68,20 @@ func normalizeInlineCodeFreeText(line string, warnings []Warning) (string, []War
 			})
 		}
 	}
-	return strings.Join(parts, "`"), warnings
+	joined := strings.Join(parts, "`")
+	// Strip inline \[...\] display math brackets, keeping only the content.
+	// These are LaTeX display math delimiters that don't work in GitHub Markdown.
+	joined = displayMathBracketPattern.ReplaceAllString(joined, "$1")
+	// In GitHub Markdown, \{ and \} inside $...$ inline math get their backslash
+	// consumed by the Markdown parser, causing MathJax "Extra open brace" errors.
+	// Replace with \lbrace/\rbrace which are semantically equivalent and safe.
+	joined = inlineMathPattern.ReplaceAllStringFunc(joined, func(match string) string {
+		inner := match[1 : len(match)-1]
+		inner = strings.ReplaceAll(inner, `\{`, `\lbrace `)
+		inner = strings.ReplaceAll(inner, `\}`, `\rbrace `)
+		return "$" + inner + "$"
+	})
+	return joined, warnings
 }
 
 func wrapStandaloneMathBlocks(lines []string, warnings []Warning) (string, []Warning) {
@@ -164,8 +183,26 @@ func replaceMathSymbols(input string) (string, int) {
 		count += strings.Count(input, symbol)
 	}
 	replaced := mathSymbolReplacer.Replace(input)
-	if updated := specialFunctionOperatorReplacer.Replace(replaced); updated != replaced {
-		replaced = updated
+	replaced = rewriteOperatorname(replaced)
+	// Replace raw < and > with \lt / \gt to prevent GitHub's Markdown
+	// parser from HTML-encoding them as &lt; / &gt;, which breaks MathJax.
+	// Use \lt{} / \gt{} to ensure trailing letters aren't consumed as
+	// part of the command name (e.g. \ltj → \lt{}j, not \ltj).
+	if strings.Contains(replaced, "<") {
+		count += strings.Count(replaced, "<")
+		replaced = bareLTPattern.ReplaceAllString(replaced, `\lt{}`)
+	}
+	if strings.Contains(replaced, ">") {
+		count += strings.Count(replaced, ">")
+		replaced = bareGTPattern.ReplaceAllString(replaced, `\gt{}`)
 	}
 	return replaced, count
+}
+
+// NormalizeMathExpression applies math-level normalization (symbol replacement,
+// operatorname rewrite) to a pure math expression. This is format-agnostic and
+// should be called by any renderer before emitting math content.
+func NormalizeMathExpression(text string) string {
+	result, _ := replaceMathSymbols(text)
+	return result
 }
