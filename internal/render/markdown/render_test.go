@@ -349,3 +349,66 @@ func TestRenderConversationSplitsCheckmarkSummaryLinesIntoSeparateParagraphs(t *
 		t.Fatalf("expected checkmark summary lines to become separate markdown paragraphs: %s", got)
 	}
 }
+
+func TestRenderConversationRewritesAllowedSpecialFunctionNamesAwayFromOperatorname(t *testing.T) {
+	conv := model.Conversation{
+		Title: "Operatorname Demo",
+		Messages: []model.Message{
+			{
+				Role: "assistant",
+				Content: strings.Join([]string{
+					`误差函数 $\operatorname{erf}(x)$。`,
+					`正弦积分 $\operatorname{Si}(x)$。`,
+					`虚误差函数 $\operatorname{erfi}(x)=-i\operatorname{erf}(ix)$。`,
+				}, "\n"),
+			},
+		},
+	}
+
+	got, warnings := RenderConversation(conv)
+
+	if len(warnings) != 0 {
+		t.Fatalf("unexpected warnings: %#v", warnings)
+	}
+	if strings.Contains(got, `\operatorname{erf}`) || strings.Contains(got, `\operatorname{Si}`) || strings.Contains(got, `\operatorname{erfi}`) {
+		t.Fatalf("expected known special functions to be rewritten away from operatorname: %s", got)
+	}
+	if !strings.Contains(got, `\mathrm{erf}(x)`) || !strings.Contains(got, `\mathrm{Si}(x)`) || !strings.Contains(got, `\mathrm{erfi}(x)=-i\mathrm{erf}(ix)`) {
+		t.Fatalf("expected known special functions to use \\mathrm instead: %s", got)
+	}
+}
+
+func TestRenderConversationRewritesSpecialFunctionNamesInsideTableCells(t *testing.T) {
+	conv := model.Conversation{
+		Title: "Table Operatorname Demo",
+		Messages: []model.Message{
+			{
+				Role: "assistant",
+				Blocks: []model.Block{
+					{
+						Kind: model.BlockTable,
+						Table: &model.Table{
+							Headers: []string{"函数", "说明"},
+							Rows: [][]string{
+								{`$e^{-x^2}$`, `误差函数 $\operatorname{erf}(x)$ 表示`},
+								{`$\frac{\sin x}{x}$`, `正弦积分 $\operatorname{Si}(x)$`},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	got, warnings := RenderConversation(conv)
+
+	if len(warnings) != 0 {
+		t.Fatalf("unexpected warnings: %#v", warnings)
+	}
+	if strings.Contains(got, `\operatorname{erf}`) || strings.Contains(got, `\operatorname{Si}`) {
+		t.Fatalf("expected table cells to rewrite known special functions away from operatorname: %s", got)
+	}
+	if !strings.Contains(got, `\mathrm{erf}(x)`) || !strings.Contains(got, `\mathrm{Si}(x)`) {
+		t.Fatalf("expected table cells to use \\mathrm for known special functions: %s", got)
+	}
+}

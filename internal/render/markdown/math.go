@@ -20,6 +20,16 @@ var mathSymbolReplacer = strings.NewReplacer(
 	"÷", `\div`,
 )
 
+var specialFunctionOperatorReplacer = strings.NewReplacer(
+	`\operatorname{erf}`, `\mathrm{erf}`,
+	`\operatorname{erfi}`, `\mathrm{erfi}`,
+	`\operatorname{erfc}`, `\mathrm{erfc}`,
+	`\operatorname{Si}`, `\mathrm{Si}`,
+	`\operatorname{Ci}`, `\mathrm{Ci}`,
+	`\operatorname{Li}`, `\mathrm{Li}`,
+	`\operatorname{Ei}`, `\mathrm{Ei}`,
+)
+
 func NormalizeMathText(input string, opts NormalizeOptions) (string, []Warning) {
 	lines := strings.Split(input, "\n")
 	inFence := false
@@ -153,5 +163,9 @@ func replaceMathSymbols(input string) (string, int) {
 	for _, symbol := range []string{"∞", "≤", "≥", "→", "∈", "≠", "±", "×", "÷"} {
 		count += strings.Count(input, symbol)
 	}
-	return mathSymbolReplacer.Replace(input), count
+	replaced := mathSymbolReplacer.Replace(input)
+	if updated := specialFunctionOperatorReplacer.Replace(replaced); updated != replaced {
+		replaced = updated
+	}
+	return replaced, count
 }
