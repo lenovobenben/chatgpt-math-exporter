@@ -321,3 +321,31 @@ func TestRenderConversationSplitsLabelPlusInlineMathIntoParagraphAndBlock(t *tes
 		t.Fatalf("expected mixed prose+math line to remain unchanged: %s", got)
 	}
 }
+
+func TestRenderConversationSplitsCheckmarkSummaryLinesIntoSeparateParagraphs(t *testing.T) {
+	conv := model.Conversation{
+		Title: "Summary Demo",
+		Messages: []model.Message{
+			{
+				Role: "assistant",
+				Content: strings.Join([]string{
+					"#### ✓ 总结",
+					"",
+					"✔ 无理 / 有理性质由数值决定",
+					"✔ 与所使用的进制无关",
+					"✔ 有理数在任意进制中展开最终循环",
+					"✔ 无理数在任意进制中展开都不循环",
+				}, "\n"),
+			},
+		},
+	}
+
+	got, warnings := RenderConversation(conv)
+
+	if len(warnings) != 0 {
+		t.Fatalf("unexpected warnings: %#v", warnings)
+	}
+	if !strings.Contains(got, "✔ 无理 / 有理性质由数值决定\n\n✔ 与所使用的进制无关\n\n✔ 有理数在任意进制中展开最终循环\n\n✔ 无理数在任意进制中展开都不循环") {
+		t.Fatalf("expected checkmark summary lines to become separate markdown paragraphs: %s", got)
+	}
+}

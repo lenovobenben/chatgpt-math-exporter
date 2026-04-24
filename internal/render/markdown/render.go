@@ -224,6 +224,7 @@ var (
 	labelInlineMathLine      = regexp.MustCompile(`^(.+?[：:])[ \t]*\$(.+)\$[ \t]*$`)
 	imageMarkerLine          = regexp.MustCompile(`^\[\[CGME_IMAGE:(\{.*\})\]\]$`)
 	trailingMathTagLine      = regexp.MustCompile(`(?s)^(.+?)\s*\\tag\{([^{}]+)\}\s*$`)
+	checkmarkSummaryLine     = regexp.MustCompile(`^[✔✓☑✅]\s+.+$`)
 )
 
 func splitParagraphBlocks(text string) []model.Block {
@@ -248,6 +249,11 @@ func splitParagraphBlocks(text string) []model.Block {
 		if image, ok := extractImageMarker(line); ok {
 			flushParagraph()
 			blocks = append(blocks, model.Block{Kind: model.BlockImage, Image: image})
+			continue
+		}
+		if isCheckmarkSummaryLine(line) {
+			flushParagraph()
+			blocks = append(blocks, model.Block{Kind: model.BlockParagraph, Text: line})
 			continue
 		}
 		if math, ok := extractStandaloneInlineMath(line); ok {
@@ -310,6 +316,10 @@ func extractImageMarker(line string) (*model.Image, bool) {
 		Alt: strings.TrimSpace(marker.Alt),
 		Src: src,
 	}, true
+}
+
+func isCheckmarkSummaryLine(line string) bool {
+	return checkmarkSummaryLine.MatchString(strings.TrimSpace(line))
 }
 
 func isMarkdownTableHeaderLine(line string) bool {
