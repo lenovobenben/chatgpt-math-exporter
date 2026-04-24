@@ -431,6 +431,9 @@ func formatMathTagLabel(tag string) string {
 }
 
 func renderTable(table *model.Table) string {
+	if shouldRenderTableAsStructuredRows(table) {
+		return renderStructuredTableRows(table)
+	}
 	headers := normalizeTableRow(table.Headers)
 	if len(headers) == 0 {
 		return ""
@@ -469,12 +472,92 @@ func normalizeTableRow(cells []string) []string {
 	}
 	out := make([]string, 0, len(cells))
 	for _, cell := range cells {
-		clean := strings.TrimSpace(cell)
+		clean := normalizeTableCell(cell)
 		clean = strings.ReplaceAll(clean, "\n", "<br>")
 		clean = strings.ReplaceAll(clean, "|", `\|`)
 		out = append(out, clean)
 	}
 	return out
+}
+
+func normalizeTableCell(cell string) string {
+	clean := strings.TrimSpace(cell)
+	normalized, _ := normalizeInlineCodeFreeText(clean, nil)
+	return strings.TrimSpace(normalized)
+}
+
+func shouldRenderTableAsStructuredRows(table *model.Table) bool {
+	if table == nil {
+		return false
+	}
+	for _, header := range table.Headers {
+		if tableCellNeedsStructuredRender(header) {
+			return true
+		}
+	}
+	for _, row := range table.Rows {
+		for _, cell := range row {
+			if tableCellNeedsStructuredRender(cell) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func tableCellNeedsStructuredRender(cell string) bool {
+	trimmed := strings.TrimSpace(cell)
+	if len(trimmed) < 4 {
+		return false
+	}
+	if strings.HasPrefix(trimmed, "$") && strings.HasSuffix(trimmed, "$") {
+		body := strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(trimmed, "$"), "$"))
+		if strings.Contains(body, `\begin{`) || strings.Contains(body, `\\`) {
+			return true
+		}
+	}
+	return false
+}
+
+func renderStructuredTableRows(table *model.Table) string {
+	headers := normalizeTableRow(table.Headers)
+	if len(headers) == 0 {
+		return ""
+	}
+
+	sections := make([]string, 0, len(table.Rows))
+	for i, row := range table.Rows {
+		parts := []string{fmt.Sprintf("##### Row %d", i+1)}
+		for j, header := range headers {
+			cell := ""
+			if j < len(row) {
+				cell = strings.TrimSpace(row[j])
+			}
+			rendered := renderStructuredTableCell(cell)
+			if rendered == "" {
+				continue
+			}
+			parts = append(parts, header)
+			parts = append(parts, rendered)
+		}
+		sections = append(sections, strings.Join(parts, "\n\n"))
+	}
+	return strings.Join(sections, "\n\n")
+}
+
+func renderStructuredTableCell(cell string) string {
+	trimmed := strings.TrimSpace(cell)
+	if trimmed == "" {
+		return ""
+	}
+	if strings.HasPrefix(trimmed, "$") && strings.HasSuffix(trimmed, "$") {
+		body := strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(trimmed, "$"), "$"))
+		if body != "" && (strings.Contains(body, `\begin{`) || strings.Contains(body, `\\`)) {
+			return "```math\n" + body + "\n```"
+		}
+	}
+	normalized := normalizeTableCell(trimmed)
+	return normalized
 }
 
 func escapeImageAlt(alt string) string {

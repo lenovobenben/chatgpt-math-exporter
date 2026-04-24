@@ -326,15 +326,131 @@ func runCDPDOMExtraction(ctx context.Context, port int, pageURL, cookieHeader st
     return annotation ? (annotation.textContent || '').trim() : '';
   };
   const fence = String.fromCharCode(96, 96, 96);
+  const isLikelyCodeToolbarText = (text) => {
+    const compact = (text || '').replace(/\s+/g, '').trim();
+    if (!compact || compact.length > 24) return false;
+    return /^(Python|JavaScript|TypeScript|Bash|Shell|Go|Rust|Java|Kotlin|Swift|Ruby|PHP|SQL|HTML|CSS|JSON|YAML|Text|PlainText)?(运行|Run)?(复制代码|Copycode|Copy)?$/.test(compact);
+  };
+  const codeLanguageAlias = (text) => {
+    const compact = (text || '').replace(/\s+/g, '').trim().toLowerCase();
+    switch (compact) {
+      case 'python':
+        return 'python';
+      case 'javascript':
+        return 'javascript';
+      case 'typescript':
+        return 'typescript';
+      case 'bash':
+      case 'shell':
+        return 'bash';
+      case 'go':
+        return 'go';
+      case 'rust':
+        return 'rust';
+      case 'java':
+        return 'java';
+      case 'kotlin':
+        return 'kotlin';
+      case 'swift':
+        return 'swift';
+      case 'ruby':
+        return 'ruby';
+      case 'php':
+        return 'php';
+      case 'sql':
+        return 'sql';
+      case 'html':
+        return 'html';
+      case 'css':
+        return 'css';
+      case 'json':
+        return 'json';
+      case 'yaml':
+        return 'yaml';
+      default:
+        return '';
+    }
+  };
+  const extractTextPreserveBlocks = (root) => {
+    const pieces = [];
+    const pushText = (text) => {
+      if (!text) return;
+      pieces.push(text.replace(/\u00a0/g, ' '));
+    };
+    const ensureLineBreak = () => {
+      if (!pieces.length) return;
+      if (pieces[pieces.length - 1].endsWith("\n")) return;
+      pieces.push("\n");
+    };
+    const walk = (node) => {
+      if (!node) return;
+      if (node.nodeType === Node.TEXT_NODE) {
+        pushText(node.textContent || '');
+        return;
+      }
+      if (node.nodeType !== Node.ELEMENT_NODE) {
+        return;
+      }
+      const tag = (node.tagName || '').toLowerCase();
+      if (tag === 'br') {
+        ensureLineBreak();
+        return;
+      }
+      const blockLike = /^(div|p|li|section|article|header|footer|tr)$/.test(tag);
+      if (blockLike) {
+        ensureLineBreak();
+      }
+      Array.from(node.childNodes || []).forEach((child) => walk(child));
+      if (blockLike) {
+        ensureLineBreak();
+      }
+    };
+    Array.from(root.childNodes || []).forEach((child) => walk(child));
+    return pieces.join('').replace(/\n{3,}/g, '\n\n').trim();
+  };
+  const extractCodeText = (pre) => {
+    const clone = pre.cloneNode(true);
+    clone.querySelectorAll('button, svg, script, style').forEach((el) => el.remove());
+    Array.from(clone.children || []).forEach((el) => {
+      const text = (el.innerText || el.textContent || '').replace(/\u00a0/g, ' ').trim();
+      if (isLikelyCodeToolbarText(text)) {
+        el.remove();
+      }
+    });
+    const code = clone.querySelector('code');
+    if (code) {
+      const text = extractTextPreserveBlocks(code);
+      if (text) return text;
+    }
+    const lineNodes = Array.from(clone.querySelectorAll('[data-line-number], .view-line, [class*="line"]'))
+      .map((el) => (el.innerText || el.textContent || '').replace(/\u00a0/g, ' ').trimEnd())
+      .filter((text) => text && !isLikelyCodeToolbarText(text));
+    if (lineNodes.length > 1) {
+      return lineNodes.join("\n");
+    }
+    const childBlocks = Array.from(clone.children)
+      .map((el) => (el.innerText || el.textContent || '').replace(/\u00a0/g, ' ').trimEnd())
+      .filter((text) => text && !isLikelyCodeToolbarText(text));
+    if (childBlocks.length > 1) {
+      return childBlocks.join("\n");
+    }
+    return extractTextPreserveBlocks(clone) || (clone.innerText || clone.textContent || '').replace(/\u00a0/g, ' ').trimEnd();
+  };
   const escapeCell = (text) => (text || '').replace(/\|/g, '\\|').replace(/\n/g, '<br>').trim();
   const serializeFragment = (root) => {
     const clone = root.cloneNode(true);
     clone.querySelectorAll('pre').forEach((el) => {
       const code = el.querySelector('code');
-      const text = ((code || el).innerText || '').replace(/\u00a0/g, ' ').trimEnd();
+      let text = extractCodeText(el);
       const className = (code && code.getAttribute('class')) || el.getAttribute('data-language') || '';
       const match = className.match(/language-([a-z0-9_+-]+)/i);
-      const language = match ? match[1] : '';
+      let language = match ? match[1] : '';
+      const lines = text.split("\n");
+      const firstLineLanguage = codeLanguageAlias(lines[0] || '');
+      if (!language && firstLineLanguage) {
+        language = firstLineLanguage;
+        text = lines.slice(1).join("\n").trimStart();
+      }
       const fenceText = "\n" + fence + language + "\n" + text + "\n" + fence + "\n";
       el.replaceWith(document.createTextNode(fenceText));
     });
@@ -391,7 +507,7 @@ func runCDPDOMExtraction(ctx context.Context, port int, pageURL, cookieHeader st
       el.replaceWith(document.createTextNode(text ? "\n\n" + text + "\n\n" : "\n\n"));
     });
     clone.querySelectorAll('svg, script, style').forEach((el) => el.remove());
-    return (clone.innerText || '').trim();
+    return (clone.textContent || clone.innerText || '').trim();
   };
   const tableToMarkdown = (table) => {
     const rows = Array.from(table.querySelectorAll('tr'))
