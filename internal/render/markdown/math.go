@@ -53,9 +53,6 @@ func NormalizeMathText(input string, opts NormalizeOptions) (string, []Warning) 
 
 var displayMathBracketPattern = regexp.MustCompile(`\\\[((?:[^\\]|\\[^\]])*?)\\\]`)
 
-// inlineMathPattern matches $...$ inline math (no nesting, no $ inside).
-var inlineMathPattern = regexp.MustCompile(`\$([^\$]+)\$`)
-
 func normalizeInlineCodeFreeText(line string, warnings []Warning) (string, []Warning) {
 	parts := strings.Split(line, "`")
 	for i := 0; i < len(parts); i += 2 {
@@ -72,16 +69,11 @@ func normalizeInlineCodeFreeText(line string, warnings []Warning) (string, []War
 	// Strip inline \[...\] display math brackets, keeping only the content.
 	// These are LaTeX display math delimiters that don't work in GitHub Markdown.
 	joined = displayMathBracketPattern.ReplaceAllString(joined, "$1")
-	// In GitHub Markdown, \{ and \} inside $...$ inline math get their backslash
-	// consumed by the Markdown parser, causing MathJax "Extra open brace" errors.
-	// Replace with \lbrace/\rbrace which are semantically equivalent and safe.
-	joined = inlineMathPattern.ReplaceAllStringFunc(joined, func(match string) string {
-		inner := match[1 : len(match)-1]
-		inner = strings.ReplaceAll(inner, `\{`, `\lbrace `)
-		inner = strings.ReplaceAll(inner, `\}`, `\rbrace `)
-		inner = rewriteAngleBrackets(inner)
-		return "$" + inner + "$"
-	})
+	// Do NOT rewrite \{/\} or < /> inside $...$ inline math here.
+	// GitHub's inline math pipeline extracts $...$ content and passes it directly
+	// to MathJax, so \{ and < are handled correctly by MathJax itself.
+	// Replacing with \lbrace/\lt{} etc. actually BREAKS rendering because
+	// GitHub's MathJax configuration does not support those commands in inline mode.
 	return joined, warnings
 }
 

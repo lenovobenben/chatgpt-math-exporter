@@ -535,7 +535,7 @@ func TestRenderConversationStripsInlineDisplayMathBrackets(t *testing.T) {
 	}
 }
 
-func TestRenderConversationRewritesLiteralBracesInInlineMath(t *testing.T) {
+func TestRenderConversationPreservesLiteralBracesInInlineMath(t *testing.T) {
 	conv := model.Conversation{
 		Title: "Literal Brace Demo",
 		Messages: []model.Message{
@@ -547,15 +547,14 @@ func TestRenderConversationRewritesLiteralBracesInInlineMath(t *testing.T) {
 	}
 
 	got, _ := RenderConversation(conv)
-	if strings.Contains(got, `\{`) || strings.Contains(got, `\}`) {
-		t.Fatalf("expected \\{ and \\} to be rewritten in inline math: %s", got)
-	}
-	if !strings.Contains(got, `\lbrace`) || !strings.Contains(got, `\rbrace`) {
-		t.Fatalf("expected \\lbrace/\\rbrace in inline math: %s", got)
+	// Inline math \{ and \} must be preserved as-is for GitHub MathJax.
+	// \lbrace/\rbrace do NOT work in GitHub inline math.
+	if !strings.Contains(got, `\{a,b,c,d\}`) {
+		t.Fatalf("expected \\{ and \\} to be preserved in inline math: %s", got)
 	}
 }
 
-func TestRenderConversationRewritesRawAngleBracketsInMath(t *testing.T) {
+func TestRenderConversationRewritesRawAngleBracketsInMathBlock(t *testing.T) {
 	conv := model.Conversation{
 		Title: "Angle Bracket Demo",
 		Messages: []model.Message{
@@ -572,16 +571,19 @@ func TestRenderConversationRewritesRawAngleBracketsInMath(t *testing.T) {
 	if !strings.Contains(got, `\lt{}j`) {
 		t.Fatalf("expected \\lt{}j in math block: %s", got)
 	}
+}
 
-	conv2 := model.Conversation{
+func TestRenderConversationPreservesAngleBracketsInInlineMath(t *testing.T) {
+	conv := model.Conversation{
 		Title: "GT Demo",
 		Messages: []model.Message{
 			{Role: "assistant", Content: `当 $d>0$ 时 $x,y,z>0$ 成立。`},
 		},
 	}
-	got2, _ := RenderConversation(conv2)
-	if !strings.Contains(got2, `$d\gt{}0$`) {
-		t.Fatalf("expected $d\\gt{}0$ in output: %s", got2)
+	got, _ := RenderConversation(conv)
+	// Inline math > must be preserved as-is; \gt{} does NOT work in GitHub inline math.
+	if !strings.Contains(got, `$d>0$`) {
+		t.Fatalf("expected $d>0$ to be preserved in inline math: %s", got)
 	}
 }
 
