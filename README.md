@@ -438,6 +438,10 @@ Direct HTTP-only access to `chatgpt.com/backend-api/...` may still be blocked by
 - some editor previews may differ from GitHub rendering
 - the project currently focuses on ChatGPT only
 
+## License
+
+This project is open source under the MIT License.
+
 ## Development
 
 Useful commands:
@@ -771,6 +775,10 @@ options:
 - 数学格式处理仍然是启发式，不是完整 TeX 解析器
 - 不同本地编辑器的预览效果可能和 GitHub 不完全一致
 - 当前只专注 ChatGPT，不考虑其他平台
+
+## 开源协议
+
+本项目基于 MIT License 开源。
 
 ## 开发命令
 
