@@ -20,6 +20,8 @@ type ProjectFetcher interface {
 	FetchConversation(ctx context.Context, info ProjectURLInfo) (FetchedConversation, error)
 }
 
+var sessionCookieOnlineValidator = validateSessionCookieOnline
+
 type FetchedConversation struct {
 	ProjectName string
 	Title       string
@@ -241,7 +243,171 @@ func resolveSessionCookie(cfg config.Config) (string, error) {
 				Message: fmt.Sprintf("Cookie file %q is empty.", cfg.Source.CookieFile),
 			}
 		}
+		if err := validateSessionCookieHeader(cookie); err != nil {
+			return "", err
+		}
 		return cookie, nil
 	}
-	return strings.TrimSpace(os.Getenv(sessionCookieEnv)), nil
+	cookie := strings.TrimSpace(os.Getenv(sessionCookieEnv))
+	if cookie == "" {
+		return "", nil
+	}
+	if err := validateSessionCookieHeader(cookie); err != nil {
+		return "", err
+	}
+	return cookie, nil
+}
+
+func validateProjectSessionCookie(cfg config.Config) error {
+	if cfg.Source.Type != "project_url" && cfg.Source.Type != "project_url_list" {
+		return nil
+	}
+	cookie, err := resolveSessionCookie(cfg)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(cookie) == "" {
+		return &ProjectFetchError{
+			Code:    "source.project_url.session_cookie_missing",
+			Message: fmt.Sprintf("Set %s or --cookie-file to a valid ChatGPT session cookie before live project export.", sessionCookieEnv),
+		}
+	}
+
+	info, ok, err := cookieValidationConversation(cfg)
+	if err != nil {
+		return err
+	}
+	if ok {
+		return sessionCookieOnlineValidator(context.Background(), cookie, info)
+	}
+	return nil
+}
+
+func cookieValidationConversation(cfg config.Config) (ProjectURLInfo, bool, error) {
+	switch cfg.Source.Type {
+	case "project_url":
+		info, err := parseProjectURL(cfg.Source.ProjectURL)
+		if err != nil {
+			return ProjectURLInfo{}, false, err
+		}
+		return info, info.ConversationID != "", nil
+	case "project_url_list":
+		urls, err := readProjectURLList(cfg.Source.URLList)
+		if err != nil {
+			return ProjectURLInfo{}, false, err
+		}
+		if len(urls) == 0 {
+			return ProjectURLInfo{}, false, nil
+		}
+		info, err := parseProjectURL(urls[0])
+		if err != nil {
+			return ProjectURLInfo{}, false, err
+		}
+		return info, info.ConversationID != "", nil
+	default:
+		return ProjectURLInfo{}, false, nil
+	}
+}
+
+func validateSessionCookieOnline(ctx context.Context, cookie string, info ProjectURLInfo) error {
+	if strings.TrimSpace(info.ConversationID) == "" {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	fetcher := &ChatGPTProjectFetcher{
+		client: &http.Client{
+			Timeout: 10 * time.Second,
+		},
+		sessionCookie: cookie,
+		baseURL:       "https://chatgpt.com",
+	}
+	req, err := fetcher.newConversationRequest(ctx, info)
+	if err != nil {
+		return err
+	}
+	resp, err := fetcher.client.Do(req)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+	if err != nil {
+		return nil
+	}
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		if isCloudflareChallenge(resp, body) {
+			return nil
+		}
+		return &ProjectFetchError{
+			Code:    "source.project_url.cookie_auth_failed",
+			Message: "ChatGPT rejected the session cookie during preflight validation. Refresh the cookie and rerun.",
+		}
+	}
+	return nil
+}
+
+func validateSessionCookieHeader(cookie string) error {
+	cookie = strings.TrimSpace(cookie)
+	if cookie == "" {
+		return &ProjectFetchError{
+			Code:    "source.project_url.cookie_empty",
+			Message: "ChatGPT session cookie is empty.",
+		}
+	}
+	if strings.ContainsAny(cookie, "\r\n") {
+		return &ProjectFetchError{
+			Code:    "source.project_url.cookie_invalid",
+			Message: "ChatGPT session cookie must be a single-line Cookie header.",
+		}
+	}
+
+	hasPair := false
+	hasChatGPTSession := false
+	for _, part := range strings.Split(cookie, ";") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		eq := strings.Index(part, "=")
+		if eq <= 0 {
+			return &ProjectFetchError{
+				Code:    "source.project_url.cookie_invalid",
+				Message: fmt.Sprintf("Cookie entry %q is not in name=value form.", part),
+			}
+		}
+		name := strings.TrimSpace(part[:eq])
+		value := strings.TrimSpace(part[eq+1:])
+		if name == "" || value == "" || strings.ContainsAny(name, " \t") {
+			return &ProjectFetchError{
+				Code:    "source.project_url.cookie_invalid",
+				Message: fmt.Sprintf("Cookie entry %q is not a valid name=value pair.", part),
+			}
+		}
+		hasPair = true
+		if isChatGPTSessionCookieName(name) {
+			hasChatGPTSession = true
+		}
+	}
+	if !hasPair {
+		return &ProjectFetchError{
+			Code:    "source.project_url.cookie_invalid",
+			Message: "ChatGPT session cookie does not contain any name=value entries.",
+		}
+	}
+	if !hasChatGPTSession {
+		return &ProjectFetchError{
+			Code:    "source.project_url.cookie_invalid",
+			Message: "Cookie header does not contain a known ChatGPT session token cookie.",
+		}
+	}
+	return nil
+}
+
+func isChatGPTSessionCookieName(name string) bool {
+	return name == "__Secure-next-auth.session-token" ||
+		strings.HasPrefix(name, "__Secure-next-auth.session-token.") ||
+		name == "oai-auth-token"
 }

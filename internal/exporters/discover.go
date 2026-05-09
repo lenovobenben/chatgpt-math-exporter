@@ -35,6 +35,17 @@ func DiscoverProjectPageURLs(projectPageURL, cookieFile, outputList string) erro
 		if cookie == "" {
 			return fmt.Errorf("cookie file %q is empty", cookieFile)
 		}
+	} else {
+		cookie = strings.TrimSpace(os.Getenv(sessionCookieEnv))
+	}
+	if cookie == "" {
+		return &ProjectFetchError{
+			Code:    "source.project_url.session_cookie_missing",
+			Message: fmt.Sprintf("Set %s or --cookie-file to a valid ChatGPT session cookie before project discovery.", sessionCookieEnv),
+		}
+	}
+	if err := validateSessionCookieHeader(cookie); err != nil {
+		return err
 	}
 
 	fetcher, ok := browserProjectFetcherFactory(cookie)

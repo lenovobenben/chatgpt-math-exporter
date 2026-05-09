@@ -75,6 +75,9 @@ func (c CompositeProjectFetcher) FetchConversation(ctx context.Context, info Pro
 		if err == nil {
 			return fetched, nil
 		}
+		if isAuthFailureError(err) {
+			return FetchedConversation{}, err
+		}
 		errs = append(errs, err.Error())
 	}
 
@@ -146,6 +149,12 @@ func (f *CDPBrowserProjectFetcher) FetchConversation(ctx context.Context, info P
 		return FetchedConversation{}, &ProjectFetchError{
 			Code:    "source.project_url.browser_dom_failed",
 			Message: payload.Error,
+		}
+	}
+	if isBrowserLoginPage(payload) {
+		return FetchedConversation{}, &ProjectFetchError{
+			Code:    "source.project_url.cookie_auth_failed",
+			Message: "ChatGPT opened the login page during browser export. Refresh the cookie and rerun.",
 		}
 	}
 
@@ -866,6 +875,18 @@ func browserDOMEmptyMessage(payload browserConversationPayload) string {
 		parts = append(parts, fmt.Sprintf("snippet=%q", payload.Snippet))
 	}
 	return strings.Join(parts, " ")
+}
+
+func isBrowserLoginPage(payload browserConversationPayload) bool {
+	pageURL := strings.ToLower(strings.TrimSpace(payload.URL))
+	title := strings.ToLower(strings.TrimSpace(payload.Title))
+	snippet := strings.ToLower(strings.TrimSpace(payload.Snippet))
+	return strings.Contains(pageURL, "/auth/login") ||
+		strings.Contains(title, "开始使用") ||
+		strings.Contains(title, "log in") ||
+		strings.Contains(title, "login") ||
+		strings.Contains(snippet, "登录") && strings.Contains(snippet, "免费注册") ||
+		strings.Contains(snippet, "log in") && strings.Contains(snippet, "sign up")
 }
 
 func appendSessionWarnings(warnings []warningRecord, launched bool) []warningRecord {

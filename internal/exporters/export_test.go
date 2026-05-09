@@ -16,6 +16,18 @@ import (
 	"github.com/lihd/chatgpt-math-exporter/internal/model"
 )
 
+func withValidSessionCookiePreflight(t *testing.T) {
+	t.Helper()
+	t.Setenv(sessionCookieEnv, "__Secure-next-auth.session-token=test")
+	originalValidator := sessionCookieOnlineValidator
+	sessionCookieOnlineValidator = func(context.Context, string, ProjectURLInfo) error {
+		return nil
+	}
+	t.Cleanup(func() {
+		sessionCookieOnlineValidator = originalValidator
+	})
+}
+
 func TestRunBundleExport(t *testing.T) {
 	bundleDir := t.TempDir()
 	outputDir := t.TempDir()
@@ -334,10 +346,10 @@ func TestProjectFetcherRequiresSessionCookie(t *testing.T) {
 
 func TestProjectFetcherReadsCookieFromFile(t *testing.T) {
 	cookieFile := filepath.Join(t.TempDir(), "cookie.txt")
-	if err := os.WriteFile(cookieFile, []byte("session=from-file"), 0o600); err != nil {
+	if err := os.WriteFile(cookieFile, []byte("__Secure-next-auth.session-token=from-file"), 0o600); err != nil {
 		t.Fatalf("write cookie file: %v", err)
 	}
-	t.Setenv(sessionCookieEnv, "session=from-env")
+	t.Setenv(sessionCookieEnv, "__Secure-next-auth.session-token=from-env")
 
 	fetcher := NewProjectFetcher(config.Config{
 		Source: config.SourceConfig{
@@ -362,7 +374,7 @@ func TestProjectFetcherReadsCookieFromFile(t *testing.T) {
 	if httpFetcher == nil {
 		t.Fatalf("expected HTTP fallback fetcher to be configured")
 	}
-	if httpFetcher.sessionCookie != "session=from-file" {
+	if httpFetcher.sessionCookie != "__Secure-next-auth.session-token=from-file" {
 		t.Fatalf("expected cookie from file, got %q", httpFetcher.sessionCookie)
 	}
 }
@@ -390,7 +402,119 @@ func TestProjectFetcherRejectsEmptyCookieFile(t *testing.T) {
 	}
 }
 
+func TestProjectFetcherRejectsMalformedCookieFile(t *testing.T) {
+	cookieFile := filepath.Join(t.TempDir(), "cookie.txt")
+	if err := os.WriteFile(cookieFile, []byte("not-a-cookie"), 0o600); err != nil {
+		t.Fatalf("write cookie file: %v", err)
+	}
+
+	fetcher := NewProjectFetcher(config.Config{
+		Source: config.SourceConfig{
+			Type:       "project_url",
+			ProjectURL: "https://chatgpt.com/c/conv-1",
+			CookieFile: cookieFile,
+		},
+	})
+
+	_, err := fetcher.FetchConversation(t.Context(), ProjectURLInfo{
+		Host:           "chatgpt.com",
+		ConversationID: "conv-1",
+	})
+	if err == nil || !strings.Contains(err.Error(), "cookie_invalid") {
+		t.Fatalf("expected invalid cookie error, got %v", err)
+	}
+}
+
+func TestProjectFetcherRejectsCookieWithoutChatGPTSessionToken(t *testing.T) {
+	cookieFile := filepath.Join(t.TempDir(), "cookie.txt")
+	if err := os.WriteFile(cookieFile, []byte("foo=bar; baz=qux"), 0o600); err != nil {
+		t.Fatalf("write cookie file: %v", err)
+	}
+
+	fetcher := NewProjectFetcher(config.Config{
+		Source: config.SourceConfig{
+			Type:       "project_url",
+			ProjectURL: "https://chatgpt.com/c/conv-1",
+			CookieFile: cookieFile,
+		},
+	})
+
+	_, err := fetcher.FetchConversation(t.Context(), ProjectURLInfo{
+		Host:           "chatgpt.com",
+		ConversationID: "conv-1",
+	})
+	if err == nil || !strings.Contains(err.Error(), "known ChatGPT session token") {
+		t.Fatalf("expected missing ChatGPT session token error, got %v", err)
+	}
+}
+
+func TestRunProjectURLExportRejectsMissingCookieBeforeOutputSetup(t *testing.T) {
+	outputDir := filepath.Join(t.TempDir(), "out")
+	t.Setenv(sessionCookieEnv, "")
+
+	err := Run(config.Config{
+		Source: config.SourceConfig{
+			Type:       "project_url",
+			ProjectURL: "https://chatgpt.com/c/conv-1",
+		},
+		Output: config.OutputConfig{
+			Dir:       outputDir,
+			AssetsDir: filepath.Join(outputDir, "assets"),
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "session_cookie_missing") {
+		t.Fatalf("expected missing cookie error, got %v", err)
+	}
+	if _, statErr := os.Stat(outputDir); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("output directory should not be created before cookie validation, stat err=%v", statErr)
+	}
+}
+
+func TestRunProjectURLExportRejectsExpiredCookiePreflight(t *testing.T) {
+	t.Setenv(sessionCookieEnv, "__Secure-next-auth.session-token=expired")
+	outputDir := filepath.Join(t.TempDir(), "out")
+
+	originalValidator := sessionCookieOnlineValidator
+	sessionCookieOnlineValidator = func(context.Context, string, ProjectURLInfo) error {
+		return &ProjectFetchError{
+			Code:    "source.project_url.cookie_auth_failed",
+			Message: "ChatGPT rejected the session cookie during preflight validation. Refresh the cookie and rerun.",
+		}
+	}
+	t.Cleanup(func() {
+		sessionCookieOnlineValidator = originalValidator
+	})
+
+	originalFactory := projectFetcherFactory
+	projectFetcherFactory = func(cfg config.Config) ProjectFetcher {
+		return stubProjectFetcher{
+			err: errors.New("fetcher should not be created after failed cookie preflight"),
+		}
+	}
+	t.Cleanup(func() {
+		projectFetcherFactory = originalFactory
+	})
+
+	err := Run(config.Config{
+		Source: config.SourceConfig{
+			Type:       "project_url",
+			ProjectURL: "https://chatgpt.com/c/conv-1",
+		},
+		Output: config.OutputConfig{
+			Dir:       outputDir,
+			AssetsDir: filepath.Join(outputDir, "assets"),
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "cookie_auth_failed") {
+		t.Fatalf("expected expired cookie preflight error, got %v", err)
+	}
+	if _, statErr := os.Stat(outputDir); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("output directory should not be created after failed cookie preflight, stat err=%v", statErr)
+	}
+}
+
 func TestRunProjectURLExportWritesFetchedMarkdown(t *testing.T) {
+	withValidSessionCookiePreflight(t)
 	outputDir := t.TempDir()
 	conversationDir := filepath.Join(outputDir, "fetched-algebra", "001_fetched-algebra__69b8017a-69a0-8328-b934-c6fced4a3c0d")
 	if err := os.MkdirAll(conversationDir, 0o755); err != nil {
@@ -479,6 +603,7 @@ func TestRunProjectURLExportWritesFetchedMarkdown(t *testing.T) {
 }
 
 func TestRunProjectURLExportRemovesLegacySlugPlaceholder(t *testing.T) {
+	withValidSessionCookiePreflight(t)
 	outputDir := t.TempDir()
 	legacyDir := filepath.Join(outputDir, "jing-dian-shu-xue-ti-100li-6")
 	if err := os.MkdirAll(legacyDir, 0o755); err != nil {
@@ -538,14 +663,15 @@ func TestRunProjectURLExportRemovesLegacySlugPlaceholder(t *testing.T) {
 }
 
 func TestRunProjectURLExportWritesPlaceholderForFetchFailure(t *testing.T) {
+	withValidSessionCookiePreflight(t)
 	outputDir := t.TempDir()
 
 	originalFactory := projectFetcherFactory
 	projectFetcherFactory = func(cfg config.Config) ProjectFetcher {
 		return stubProjectFetcher{
 			err: &ProjectFetchError{
-				Code:    "source.project_url.auth_failed",
-				Message: "ChatGPT rejected the session cookie for the conversation request.",
+				Code:    "source.project_url.bad_status",
+				Message: "Conversation request returned HTTP 500.",
 			},
 		}
 	}
@@ -581,7 +707,7 @@ func TestRunProjectURLExportWritesPlaceholderForFetchFailure(t *testing.T) {
 	if !strings.Contains(string(placeholderContent), "Live project URL fetch did not return exportable messages") {
 		t.Fatalf("placeholder missing updated status: %s", string(placeholderContent))
 	}
-	if !strings.Contains(string(placeholderContent), "Fetch Status: source.project_url.auth_failed") {
+	if !strings.Contains(string(placeholderContent), "Fetch Status: source.project_url.bad_status") {
 		t.Fatalf("placeholder missing fetch status: %s", string(placeholderContent))
 	}
 
@@ -594,7 +720,50 @@ func TestRunProjectURLExportWritesPlaceholderForFetchFailure(t *testing.T) {
 	}
 }
 
+func TestRunProjectURLExportReturnsAuthFailureWithoutPlaceholder(t *testing.T) {
+	withValidSessionCookiePreflight(t)
+	outputDir := t.TempDir()
+
+	originalFactory := projectFetcherFactory
+	projectFetcherFactory = func(cfg config.Config) ProjectFetcher {
+		return stubProjectFetcher{
+			err: &ProjectFetchError{
+				Code:    "source.project_url.cookie_auth_failed",
+				Message: "ChatGPT opened the login page during browser export.",
+			},
+		}
+	}
+	defer func() {
+		projectFetcherFactory = originalFactory
+	}()
+
+	cfg := config.Config{
+		Source: config.SourceConfig{
+			Type:       "project_url",
+			ProjectURL: "https://chatgpt.com/g/g-p-69b35dca021081918246c3df20a7bf27-jing-dian-shu-xue-ti-100li-6/c/69b8017a-69a0-8328-b934-c6fced4a3c0d",
+		},
+		Output: config.OutputConfig{
+			Dir:       outputDir,
+			AssetsDir: filepath.Join(outputDir, "assets"),
+		},
+		Options: config.OptionConfig{
+			WriteReadme:   true,
+			WriteWarnings: true,
+			PreserveLinks: true,
+		},
+	}
+
+	err := Run(cfg)
+	if err == nil || !strings.Contains(err.Error(), "cookie_auth_failed") {
+		t.Fatalf("expected auth failure, got %v", err)
+	}
+	if matches, globErr := filepath.Glob(filepath.Join(outputDir, "*", "*", "001_placeholder.md")); globErr != nil || len(matches) != 0 {
+		t.Fatalf("expected no placeholder for auth failure, matches=%v err=%v", matches, globErr)
+	}
+}
+
 func TestRunProjectURLListExportWritesMultipleConversations(t *testing.T) {
+	withValidSessionCookiePreflight(t)
 	outputDir := t.TempDir()
 	urlListPath := filepath.Join(t.TempDir(), "math-sessions.txt")
 	urls := strings.Join([]string{
@@ -691,6 +860,7 @@ func TestRunProjectURLListExportWritesMultipleConversations(t *testing.T) {
 }
 
 func TestRunProjectURLListExportSeparatesProjectNameAndConversationTitle(t *testing.T) {
+	withValidSessionCookiePreflight(t)
 	outputDir := t.TempDir()
 	urlListPath := filepath.Join(t.TempDir(), "urls.txt")
 	urls := strings.Join([]string{
@@ -761,6 +931,7 @@ func TestSplitChatGPTProjectAndTitle(t *testing.T) {
 }
 
 func TestRunProjectURLListExportContinuesAndDoesNotWritePlaceholderOnFailure(t *testing.T) {
+	withValidSessionCookiePreflight(t)
 	outputDir := t.TempDir()
 	urlListPath := filepath.Join(t.TempDir(), "urls.txt")
 	if err := os.WriteFile(urlListPath, []byte(strings.Join([]string{
@@ -835,6 +1006,7 @@ func TestRunProjectURLListExportContinuesAndDoesNotWritePlaceholderOnFailure(t *
 }
 
 func TestRunProjectURLListExportContinuesAfterPerURLTimeout(t *testing.T) {
+	withValidSessionCookiePreflight(t)
 	outputDir := t.TempDir()
 	urlListPath := filepath.Join(t.TempDir(), "urls.txt")
 	if err := os.WriteFile(urlListPath, []byte(strings.Join([]string{
@@ -907,6 +1079,7 @@ func TestRunProjectURLListExportContinuesAfterPerURLTimeout(t *testing.T) {
 }
 
 func TestRunProjectURLListExportStopsAfterBrowserSessionLost(t *testing.T) {
+	withValidSessionCookiePreflight(t)
 	outputDir := t.TempDir()
 	urlListPath := filepath.Join(t.TempDir(), "urls.txt")
 	if err := os.WriteFile(urlListPath, []byte(strings.Join([]string{
@@ -986,6 +1159,7 @@ func TestRunProjectURLListExportStopsAfterBrowserSessionLost(t *testing.T) {
 }
 
 func TestRunProjectURLListExportSkipsCompletedEntriesByDefault(t *testing.T) {
+	withValidSessionCookiePreflight(t)
 	outputDir := t.TempDir()
 	urlListPath := filepath.Join(t.TempDir(), "urls.txt")
 	rawURL := "https://chatgpt.com/g/g-p-1/c/conv-1"
@@ -1063,6 +1237,7 @@ func TestRunProjectURLListExportSkipsCompletedEntriesByDefault(t *testing.T) {
 }
 
 func TestRunProjectURLListExportOverwriteRefetches(t *testing.T) {
+	withValidSessionCookiePreflight(t)
 	outputDir := t.TempDir()
 	urlListPath := filepath.Join(t.TempDir(), "urls.txt")
 	rawURL := "https://chatgpt.com/g/g-p-1/c/conv-1"
@@ -1383,6 +1558,26 @@ func TestBrowserDOMEmptyMessage(t *testing.T) {
 	}
 }
 
+func TestBrowserLoginPageDetection(t *testing.T) {
+	cases := []browserConversationPayload{
+		{URL: "https://chatgpt.com/auth/login/?next=%2Fc%2Fconv-1"},
+		{Title: "开始使用 | ChatGPT", Snippet: "开始使用\n登录\n免费注册"},
+		{Title: "Login | ChatGPT", Snippet: "Log in\nSign up"},
+	}
+	for _, tc := range cases {
+		if !isBrowserLoginPage(tc) {
+			t.Fatalf("expected login page detection for %#v", tc)
+		}
+	}
+	if isBrowserLoginPage(browserConversationPayload{
+		Title:   "ChatGPT - 经典数学题100例",
+		URL:     "https://chatgpt.com/g/g-p-demo/project",
+		Snippet: "历史聊天记录\n经典数学题100例",
+	}) {
+		t.Fatalf("did not expect project page to be detected as login")
+	}
+}
+
 func TestNewBrowserProjectFetcherAllowsExistingSessionWithoutCookie(t *testing.T) {
 	origStat := osStat
 	origLookPath := execLookPath
@@ -1447,6 +1642,48 @@ func TestBrowserFetcherDoesNotRelaunchAfterStartupFailure(t *testing.T) {
 
 	if launchCalls != 1 {
 		t.Fatalf("expected one browser launch attempt, got %d", launchCalls)
+	}
+}
+
+func TestBrowserFetcherReturnsAuthFailedForLoginPage(t *testing.T) {
+	origEnsureProfile := ensureBrowserProfile
+	origEnsureSession := ensureChromeSession
+	origRunCDP := runCDPExtraction
+	origCDPReady := cdpReady
+	defer func() {
+		ensureBrowserProfile = origEnsureProfile
+		ensureChromeSession = origEnsureSession
+		runCDPExtraction = origRunCDP
+		cdpReady = origCDPReady
+	}()
+
+	ensureBrowserProfile = func(root string) (string, error) { return root, nil }
+	ensureChromeSession = func(ctx context.Context, chromePath, profileRoot string, port int) (int, bool, error) {
+		return port, true, nil
+	}
+	runCDPExtraction = func(ctx context.Context, port int, pageURL, cookieHeader string, waitAfter time.Duration) (browserConversationPayload, error) {
+		return browserConversationPayload{
+			Title:   "开始使用 | ChatGPT",
+			URL:     "https://chatgpt.com/auth/login/?next=%2Fc%2Fconv-1",
+			Snippet: "开始使用\n登录\n免费注册",
+		}, nil
+	}
+	cdpReady = func(ctx context.Context, port int) bool { return false }
+
+	fetcher := &CDPBrowserProjectFetcher{
+		chromePath:   chromeAppPath,
+		waitAfter:    time.Second,
+		cookieHeader: "__Secure-next-auth.session-token=expired",
+		profileRoot:  "/tmp/cgme-browser-profile",
+		debugPort:    9223,
+	}
+
+	_, err := fetcher.FetchConversation(t.Context(), ProjectURLInfo{
+		Host:           "chatgpt.com",
+		ConversationID: "conv-1",
+	})
+	if err == nil || !strings.Contains(err.Error(), "cookie_auth_failed") {
+		t.Fatalf("expected cookie_auth_failed for login page, got %v", err)
 	}
 }
 
@@ -1539,6 +1776,7 @@ func TestValidateDiscoveryURL(t *testing.T) {
 }
 
 func TestDiscoverProjectPageURLsWritesOutputList(t *testing.T) {
+	t.Setenv(sessionCookieEnv, "__Secure-next-auth.session-token=test")
 	outputList := filepath.Join(t.TempDir(), "math-sessions.txt")
 
 	origFactory := browserProjectFetcherFactory

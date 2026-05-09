@@ -62,6 +62,10 @@ var newAssetHTTPClient = func() *http.Client {
 var projectURLFetchTimeout = 75 * time.Second
 
 func Run(cfg config.Config) error {
+	if err := validateProjectSessionCookie(cfg); err != nil {
+		return err
+	}
+
 	if err := os.MkdirAll(cfg.Output.Dir, 0o755); err != nil {
 		return fmt.Errorf("create output directory %q: %w", cfg.Output.Dir, err)
 	}
@@ -396,6 +400,15 @@ func exportProjectURL(cfg config.Config, fetcher ProjectFetcher, rawURL string, 
 		}, nil
 	} else {
 		if opts.AllowPlaceholder {
+			if isAuthFailureError(fetchErr) {
+				if warning, ok := warningFromError(fetchErr); ok {
+					warnings = append(warnings, warning)
+				}
+				return projectURLExportResult{
+					projectName: projectName,
+					warnings:    warnings,
+				}, fetchErr
+			}
 			if fetchErr != nil {
 				if warning, ok := warningFromError(fetchErr); ok {
 					warnings = append(warnings, warning)
@@ -459,6 +472,19 @@ func exportProjectURL(cfg config.Config, fetcher ProjectFetcher, rawURL string, 
 		}, fmt.Errorf("project URL fetch returned no messages")
 	}
 	return projectURLExportResult{}, nil
+}
+
+func isAuthFailureError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var fetchErr *ProjectFetchError
+	if errors.As(err, &fetchErr) {
+		return fetchErr.Code == "source.project_url.auth_failed" ||
+			fetchErr.Code == "source.project_url.cookie_auth_failed"
+	}
+	return strings.Contains(err.Error(), "source.project_url.auth_failed") ||
+		strings.Contains(err.Error(), "source.project_url.cookie_auth_failed")
 }
 
 func conversationFromFetched(urlInfo ProjectURLInfo, fetched FetchedConversation) Conversation {
